@@ -12,6 +12,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <cstdlib>
 
 #include "voice_common.hpp"
 
@@ -27,8 +28,10 @@ LLMInitResult initLLM(const std::string& llm_model, const std::string& llm_url,
     LLMInitResult result;
     result.system_prompt = default_system_prompt;
 
+    const char* key_env = std::getenv("OPENAI_API_KEY");
+    std::string api_key = key_env ? key_env : "";
     result.llm = std::make_shared<spacemit_llm::LLMService>(
-        llm_model, llm_url, "EMPTY", result.system_prompt, max_tokens);
+        llm_model, llm_url, api_key, result.system_prompt, max_tokens);
 
     std::cout << getTimestamp() << " [1/5] LLM 后端: " << llm_url << " OK\n";
 
