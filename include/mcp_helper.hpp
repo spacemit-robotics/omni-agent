@@ -26,6 +26,8 @@ struct MCPConfig {
         std::string type;  // "stdio", "socket", "http"
         std::string command;
         std::vector<std::string> args;
+        int startup_timeout = 30000;
+        int request_timeout = 30000;
         std::string socketPath;
         std::string url;
     };

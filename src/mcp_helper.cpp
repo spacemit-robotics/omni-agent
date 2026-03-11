@@ -47,6 +47,8 @@ bool loadMCPConfig(const std::string& path, MCPConfig& config) {
 
                 if (entry.type == "stdio") {
                     entry.command = srv["command"];
+                    entry.startup_timeout = srv.value("startup_timeout", entry.startup_timeout);
+                    entry.request_timeout = srv.value("request_timeout", entry.request_timeout);
                     if (srv.contains("args")) {
                         for (const auto& arg : srv["args"]) {
                             entry.args.push_back(arg);
