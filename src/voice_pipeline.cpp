@@ -57,7 +57,10 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
 
 #ifdef USE_MCP
     if (ctx.mcp_enabled) {
-        ctx.conversation_messages->push_back(spacemit_llm::ChatMessage::User(text));
+        {
+            std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
+            ctx.conversation_messages->push_back(spacemit_llm::ChatMessage::User(text));
+        }
 
         const int MAX_TOOL_ROUNDS = 10;
         int round = 0;
@@ -67,13 +70,18 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
             std::cout << getTimestamp() << " [AI]: " << std::flush;
 
             std::string current_tools;
+            std::vector<spacemit_llm::ChatMessage> current_messages;
             {
                 std::lock_guard<std::mutex> lock(*ctx.tools_mutex);
                 current_tools = *ctx.llm_tools_json;
             }
+            {
+                std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
+                current_messages = *ctx.conversation_messages;
+            }
 
             auto result = ctx.llm->chat_stream(
-                *ctx.conversation_messages,
+                current_messages,
                 [&](const std::string& chunk, bool is_done, const std::string& error) -> bool {
                     if (g_barge_in || !g_running) return false;
                     if (!error.empty()) {
@@ -101,8 +109,11 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
             if (result.HasToolCalls()) {
                 std::cout << getTimestamp() << " [Tool Call] 检测到工具调用\n";
 
-                ctx.conversation_messages->push_back(
-                    spacemit_llm::ChatMessage::Assistant(result.content, result.tool_calls_json));
+                {
+                    std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
+                    ctx.conversation_messages->push_back(
+                        spacemit_llm::ChatMessage::Assistant(result.content, result.tool_calls_json));
+                }
 
                 try {
                     auto tool_calls = json::parse(result.tool_calls_json);
@@ -135,8 +146,11 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
                         std::cout << getTimestamp() << " [MCP] 结果: " << result_text << std::endl;
 
                         std::string tc_id = tc.value("id", "");
-                        ctx.conversation_messages->push_back(
-                            spacemit_llm::ChatMessage::Tool(result_text, tc_id));
+                        {
+                            std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
+                            ctx.conversation_messages->push_back(
+                                spacemit_llm::ChatMessage::Tool(result_text, tc_id));
+                        }
                     }
                 } catch (const std::exception& e) {
                     std::cerr << getTimestamp() << " [MCP] 工具调用解析错误: " << e.what() << std::endl;
@@ -147,8 +161,11 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
                 continue;
             }
 
-            ctx.conversation_messages->push_back(
-                spacemit_llm::ChatMessage::Assistant(result.content));
+            {
+                std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
+                ctx.conversation_messages->push_back(
+                    spacemit_llm::ChatMessage::Assistant(result.content));
+            }
 
             if (!g_barge_in) {
                 text_buffer.stop();

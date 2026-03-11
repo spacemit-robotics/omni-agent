@@ -50,6 +50,8 @@ struct MCPInitResult {
     std::vector<spacemit_llm::ChatMessage> conversation_messages;
     std::thread registry_poll_thread;
     std::mutex tools_mutex;
+    std::mutex conversation_mutex;
+    bool tools_hint_added = false;
     std::set<std::string> known_servers;
     MCPConfig config;
 };

@@ -50,6 +50,7 @@ struct VoicePipelineContext {
     std::string* llm_tools_json = nullptr;
     std::mutex* tools_mutex = nullptr;
     std::vector<spacemit_llm::ChatMessage>* conversation_messages = nullptr;
+    std::mutex* conversation_mutex = nullptr;
     bool mcp_enabled = false;
 #endif
 };
