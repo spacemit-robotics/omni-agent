@@ -378,6 +378,7 @@ int main(int argc, char* argv[]) {
     pipeline_ctx.llm_tools_json = &mcp.llm_tools_json;
     pipeline_ctx.tools_mutex = &mcp.tools_mutex;
     pipeline_ctx.conversation_messages = &mcp.conversation_messages;
+    pipeline_ctx.conversation_mutex = &mcp.conversation_mutex;
     pipeline_ctx.mcp_enabled = mcp.enabled;
 #endif
 

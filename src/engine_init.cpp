@@ -5,6 +5,7 @@
 
 #include "engine_init.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -144,6 +145,29 @@ void initMCP(const std::string& mcp_config_path,
         << (cli_llm_model.empty() ? result.config.model : cli_llm_model) << "\n";
 
     result.manager = std::make_unique<mcp::MCPManager>();
+    result.manager->onToolChange([&result](const std::vector<mcp::Tool>& tools) {
+        std::lock_guard<std::mutex> lock(result.tools_mutex);
+        const bool had_tools_before = !result.llm_tools_json.empty() && result.llm_tools_json != "[]";
+        result.llm_tools_json = convertMCPToolsToString(tools);
+        std::cout << "\n" << getTimestamp() << " [MCP] 工具列表已更新: "
+            << tools.size() << " 个工具\n";
+
+        if (!had_tools_before && !tools.empty() && !result.tools_hint_added) {
+            std::string tools_list_str;
+            for (const auto& tool : tools) {
+                tools_list_str += "- " + tool.name + "\n";
+            }
+
+            std::lock_guard<std::mutex> conversation_lock(result.conversation_mutex);
+            result.conversation_messages.push_back(spacemit_llm::ChatMessage::System(
+                "现在已经加载了以下 MCP 工具，可以用于实际控制设备或调用后端服务：\n" +
+                tools_list_str +
+                "\n从现在开始，凡是与这些设备或服务控制 / 查询相关的请求，必须优先调用对应的 MCP 工具完成操作，"
+                "不要只用自然语言假装已经完成。"));
+            result.tools_hint_added = true;
+            std::cout << getTimestamp() << " [MCP] 已追加工具可用提示到对话上下文\n";
+        }
+    });
 
     for (const auto& srv : result.config.servers) {
         result.known_servers.insert(srv.name);
@@ -158,6 +182,8 @@ void initMCP(const std::string& mcp_config_path,
             mcp::StdioConfig sc;
             sc.command = srv.command;
             sc.args = srv.args;
+            sc.startupTimeout = std::chrono::milliseconds(srv.startup_timeout);
+            sc.requestTimeout = std::chrono::milliseconds(srv.request_timeout);
             result.manager->addStdioServer(srv.name, sc);
             std::cout << getTimestamp()
                 << " [MCP] 添加服务器: " << srv.name
@@ -191,7 +217,16 @@ void initMCP(const std::string& mcp_config_path,
     std::cout << getTimestamp() << " [MCP] 启动服务器...\n";
     result.manager->startAll();
 
-    if (result.manager->waitForAnyServer(std::chrono::milliseconds(10000))) {
+    std::chrono::milliseconds server_wait_timeout(10000);
+    for (const auto& srv : result.config.servers) {
+        if (srv.type == "stdio") {
+            server_wait_timeout = std::max(
+                server_wait_timeout,
+                std::chrono::milliseconds(srv.startup_timeout));
+        }
+    }
+
+    if (result.manager->waitForAnyServer(server_wait_timeout)) {
         auto tools = result.manager->getAllTools();
         result.llm_tools_json = convertMCPToolsToString(tools);
         std::cout << getTimestamp() << " [MCP] 已连接 "
@@ -201,7 +236,10 @@ void initMCP(const std::string& mcp_config_path,
         std::cout << getTimestamp() << " [MCP] 警告: 无可用服务器，继续等待...\n";
     }
 
-    result.conversation_messages.push_back(spacemit_llm::ChatMessage::System(result.config.system_prompt));
+    {
+        std::lock_guard<std::mutex> conversation_lock(result.conversation_mutex);
+        result.conversation_messages.push_back(spacemit_llm::ChatMessage::System(result.config.system_prompt));
+    }
 
     if (!result.config.registry_url.empty()) {
         std::cout << getTimestamp() << " [MCP] 启动注册中心轮询: " << result.config.registry_url << "\n";
