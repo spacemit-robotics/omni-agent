@@ -10,6 +10,7 @@
   <depend>llm</depend>
   <!-- webrtc-audio-processing: fetched at configure/build when USE_AEC -->
   <depend>mcp</depend>
+  <depend>voiceprint</depend>
   <system_depend check="pkg-config --exists portaudio-2.0">portaudio19-dev</system_depend>
   <system_depend check="pkg-config --exists sndfile">libsndfile1-dev</system_depend>
   <system_depend check="pkg-config --exists fftw3f">libfftw3-dev</system_depend>
