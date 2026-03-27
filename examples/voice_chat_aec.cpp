@@ -69,6 +69,18 @@ struct Config {
     // MCP 配置
     std::string mcp_config_path = "";
 
+#ifdef USE_VP
+    // Voiceprint 配置
+    bool vp_enabled = false;
+    std::string vp_database = "";
+    int vp_threads = 1;
+    float vp_threshold = 0.6f;
+    int vp_top = 3;
+    std::string vp_verify = "";
+    bool vp_list = false;
+    bool vp_verbose = false;
+#endif
+
     // 跟踪 --model 是否被显式指定
     bool llm_model_set = false;
 };
@@ -108,6 +120,24 @@ Config parseArgs(int argc, char* argv[]) {
             }
         } else if (strcmp(argv[i], "--mcp-config") == 0 && i + 1 < argc) {
             cfg.mcp_config_path = argv[++i];
+#ifdef USE_VP
+        } else if (strcmp(argv[i], "--voiceprint") == 0 || strcmp(argv[i], "-vp") == 0) {
+            cfg.vp_enabled = true;
+        } else if (strcmp(argv[i], "--vp-database") == 0 && i + 1 < argc) {
+            cfg.vp_database = argv[++i];
+        } else if (strcmp(argv[i], "--vp-threads") == 0 && i + 1 < argc) {
+            cfg.vp_threads = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--vp-threshold") == 0 && i + 1 < argc) {
+            cfg.vp_threshold = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--vp-top") == 0 && i + 1 < argc) {
+            cfg.vp_top = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--vp-verify") == 0 && i + 1 < argc) {
+            cfg.vp_verify = argv[++i];
+        } else if (strcmp(argv[i], "--vp-list") == 0) {
+            cfg.vp_list = true;
+        } else if (strcmp(argv[i], "--vp-verbose") == 0) {
+            cfg.vp_verbose = true;
+#endif
         } else if (strcmp(argv[i], "--list-voices") == 0) {
             cfg.list_voices = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -135,6 +165,15 @@ Config parseArgs(int argc, char* argv[]) {
                 << "  --save-audio [file]       保存AEC处理后的音频 (默认: aec_debug.wav)\n"
                 << "\nMCP:\n"
                 << "  --mcp-config <path>       MCP配置文件 (启用工具调用)\n"
+                << "\n声纹识别 (Voiceprint):\n"
+                << "  -vp, --voiceprint         开启声纹识别\n"
+                << "  --vp-database <file>      声纹数据库文件 (开启VP时必填)\n"
+                << "  --vp-threads <n>          推理线程数 (默认: 1)\n"
+                << "  --vp-threshold <0-1>      相似度阈值 (默认: 0.6)\n"
+                << "  --vp-top <n>              显示前N个匹配 (默认: 3)\n"
+                << "  --vp-verify <name>        验证特定说话人\n"
+                << "  --vp-list                 列出所有已注册说话人\n"
+                << "  --vp-verbose              显示所有匹配分数\n"
                 << "\n其他:\n"
                 << "  -h, --help                显示帮助\n";
             exit(0);
@@ -255,6 +294,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+#ifdef USE_VP
+    if (cfg.vp_enabled && cfg.vp_database.empty()) {
+        std::cerr << "错误: 开启声纹识别 (--voiceprint) 时必须通过 --vp-database 指定数据库文件\n";
+        return 1;
+    }
+#endif
+
     std::cout << getTimestamp() << " ========================================\n";
     std::cout << getTimestamp() << "    带 AEC 的语音对话系统 (全双工模式)\n";
     std::cout << getTimestamp() << " ========================================\n";
@@ -321,6 +367,30 @@ int main(int argc, char* argv[]) {
     initMCP(cfg.mcp_config_path, llm, system_prompt, mcp,
             cfg.llm_url,
             cfg.llm_model_set ? cfg.llm_model : "");
+#endif
+
+    // -------------------------------------------------------------------------
+    // 7. 初始化 VP (可选)
+    // -------------------------------------------------------------------------
+#ifdef USE_VP
+    std::shared_ptr<SpacemiT::VpEngine> vp_engine;
+    if (cfg.vp_enabled) {
+        if (cfg.vp_list) {
+            auto vp_result = initVP(cfg.vp_database, cfg.vp_threads, cfg.vp_threshold);
+            if (!vp_result.engine) return 1;
+            auto speakers = vp_result.engine->GetAllSpeakers();
+            std::cout << "已注册说话人 (" << speakers.size() << "):\n";
+            for (size_t i = 0; i < speakers.size(); i++) {
+                std::cout << "  " << (i + 1) << ". " << speakers[i] << "\n";
+            }
+            return 0;
+        }
+
+        auto vp_result = initVP(cfg.vp_database, cfg.vp_threads, cfg.vp_threshold);
+        if (!vp_result.engine) return 1;
+        vp_engine = vp_result.engine;
+        std::cout << getTimestamp() << " 声纹识别: ON (db: " << cfg.vp_database << ")\n";
+    }
 #endif
 
     // -------------------------------------------------------------------------
@@ -502,6 +572,62 @@ int main(int argc, char* argv[]) {
                     std::cout << "\n" << getTimestamp() << " [VAD] 停止说话，触发识别\n";
 
                     if (audio_buffer.size() > 8000) {
+#ifdef USE_VP
+                        std::string speaker_tag;
+                        bool vp_passed = true;
+                        if (vp_engine) {
+                            if (!cfg.vp_verify.empty()) {
+                                auto vp_res = vp_engine->Verify(cfg.vp_verify, audio_buffer, 16000);
+                                if (vp_res && vp_res->IsSuccess()) {
+                                    std::cout << getTimestamp() << " [VP] 验证 \""
+                                        << cfg.vp_verify << "\": "
+                                        << (vp_res->IsVerified() ? "通过" : "不通过")
+                                        << " (score: " << std::fixed << std::setprecision(3)
+                                        << vp_res->GetScore() << ")\n";
+                                    if (vp_res->IsVerified()) {
+                                        speaker_tag = "[" + cfg.vp_verify + "] ";
+                                    } else {
+                                        vp_passed = false;
+                                    }
+                                } else {
+                                    vp_passed = false;
+                                }
+                            } else {
+                                auto vp_res = vp_engine->Identify(audio_buffer, 16000);
+                                if (vp_res && vp_res->IsSuccess()) {
+                                    if (vp_res->IsIdentified()) {
+                                        std::cout << getTimestamp() << " [VP] 说话人: "
+                                            << vp_res->GetName()
+                                            << " (score: " << std::fixed << std::setprecision(3)
+                                            << vp_res->GetScore() << ")\n";
+                                        speaker_tag = "[" + vp_res->GetName() + "] ";
+                                    } else {
+                                        vp_passed = false;
+                                    }
+                                    auto matches = vp_res->GetMatches();
+                                    int show_n = cfg.vp_verbose
+                                        ? static_cast<int>(matches.size())
+                                        : std::min(cfg.vp_top, static_cast<int>(matches.size()));
+                                    if (show_n > 1 || cfg.vp_verbose) {
+                                        for (int k = 0; k < show_n; k++) {
+                                            std::cout << getTimestamp() << " [VP]   "
+                                                << (k + 1) << ". " << matches[k].name
+                                                << " (score: " << std::fixed << std::setprecision(3)
+                                                << matches[k].score << ")"
+                                                << (matches[k].score >= vp_engine->GetThreshold() ? " *" : "")
+                                                << "\n";
+                                        }
+                                    }
+                                } else {
+                                    vp_passed = false;
+                                }
+                            }
+                            if (!vp_passed) {
+                                std::cout << getTimestamp() << " [VP] 未识别说话人，丢弃音频\n";
+                            }
+                        }
+                        if (vp_passed) {
+#endif
                         std::cout << getTimestamp() << " [ASR] 开始识别...\n";
                         auto result = asr->Recognize(audio_buffer, 16000);
                         if (result && !result->IsEmpty()) {
@@ -512,13 +638,21 @@ int main(int argc, char* argv[]) {
                                 if (g_process_thread && g_process_thread->joinable()) {
                                     g_process_thread->join();
                                 }
-                                g_process_thread = std::make_unique<std::thread>([&pipeline_ctx, text]() {
-                                    processText(pipeline_ctx, text);
+#ifdef USE_VP
+                                std::string final_text = speaker_tag + text;
+#else
+                                const std::string& final_text = text;
+#endif
+                                g_process_thread = std::make_unique<std::thread>([&pipeline_ctx, final_text]() {
+                                    processText(pipeline_ctx, final_text);
                                 });
                             }
                         } else {
                             std::cout << getTimestamp() << " [ASR] 识别完成: (无结果)\n";
                         }
+#ifdef USE_VP
+                        }
+#endif
                     }
 
                     audio_buffer.clear();

@@ -64,4 +64,15 @@ void initMCP(const std::string& mcp_config_path,
     const std::string& cli_llm_model = "");
 #endif
 
+#ifdef USE_VP
+#include "vp_service.h"
+
+struct VPInitResult {
+    std::shared_ptr<SpacemiT::VpEngine> engine;
+    int speaker_count = 0;
+};
+
+VPInitResult initVP(const std::string& db_path, int threads, float threshold);
+#endif
+
 #endif  // ENGINE_INIT_HPP

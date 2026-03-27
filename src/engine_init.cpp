@@ -313,3 +313,33 @@ void initMCP(const std::string& mcp_config_path,
 }
 
 #endif  // USE_MCP
+
+#ifdef USE_VP
+
+VPInitResult initVP(const std::string& db_path, int threads, float threshold) {
+    VPInitResult result;
+    std::cout << getTimestamp() << " [VP] 初始化声纹引擎..." << std::flush;
+
+    auto config = SpacemiT::VpConfig::Preset("campplus")
+        .withNumThreads(threads)
+        .withThreshold(threshold);
+
+    result.engine = std::make_shared<SpacemiT::VpEngine>(config);
+    if (!result.engine->IsInitialized()) {
+        std::cerr << "\n" << getTimestamp() << " 错误: 声纹引擎初始化失败\n";
+        result.engine = nullptr;
+        return result;
+    }
+
+    if (!result.engine->LoadDatabase(db_path)) {
+        std::cerr << "\n" << getTimestamp() << " 错误: 无法加载声纹数据库: " << db_path << "\n";
+        result.engine = nullptr;
+        return result;
+    }
+
+    result.speaker_count = result.engine->GetSpeakerCount();
+    std::cout << " OK (" << result.speaker_count << " 个已注册说话人)\n";
+    return result;
+}
+
+#endif  // USE_VP

@@ -89,6 +89,7 @@ endif()
 # Options
 option(USE_MCP "Enable MCP (Model Context Protocol) support" ON)
 option(USE_AEC "Enable WebRTC AEC (Acoustic Echo Cancellation) for barge-in support" OFF)
+option(USE_VP "Enable Voiceprint (speaker identification) support" ON)
 
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -131,6 +132,13 @@ if(USE_MCP)
         find_path(NLOHMANN_JSON_INCLUDE_DIR NAMES nlohmann/json.hpp)
     endif()
     message(STATUS "MCP support enabled")
+endif()
+
+# voiceprint
+if(USE_VP)
+    find_library(VOICEPRINT_LIB NAMES voiceprint REQUIRED)
+    find_path(VOICEPRINT_INCLUDE_DIR NAMES vp_service.h REQUIRED)
+    message(STATUS "Voiceprint support enabled")
 endif()
 
 # ============================================================================
@@ -251,6 +259,17 @@ if(USE_AEC)
         message(STATUS "  + MCP support enabled for voice_chat_aec")
     endif()
 
+    if(USE_VP)
+        target_compile_definitions(voice_chat_aec PRIVATE USE_VP)
+        target_include_directories(voice_chat_aec PRIVATE ${VOICEPRINT_INCLUDE_DIR})
+        if(APPLE)
+            target_link_libraries(voice_chat_aec -Wl,-force_load,${VOICEPRINT_LIB})
+        else()
+            target_link_libraries(voice_chat_aec -Wl,--whole-archive ${VOICEPRINT_LIB} -Wl,--no-whole-archive)
+        endif()
+        message(STATUS "  + Voiceprint support enabled for voice_chat_aec")
+    endif()
+
     # Install WebRTC shared library to lib/
     get_filename_component(_WEBRTC_LIB_DIR "${WEBRTC_LIB}" DIRECTORY)
     install(FILES "${_WEBRTC_LIB_DIR}/libwebrtc-audio-processing-2.so.1" DESTINATION lib)
@@ -303,6 +322,17 @@ if(USE_MCP)
     endif()
     target_link_libraries(voice_chat ${MCP_LIB})
     message(STATUS "  + MCP support enabled for voice_chat")
+endif()
+
+if(USE_VP)
+    target_compile_definitions(voice_chat PRIVATE USE_VP)
+    target_include_directories(voice_chat PRIVATE ${VOICEPRINT_INCLUDE_DIR})
+    if(APPLE)
+        target_link_libraries(voice_chat -Wl,-force_load,${VOICEPRINT_LIB})
+    else()
+        target_link_libraries(voice_chat -Wl,--whole-archive ${VOICEPRINT_LIB} -Wl,--no-whole-archive)
+    endif()
+    message(STATUS "  + Voiceprint support enabled for voice_chat")
 endif()
 
 install(TARGETS voice_chat RUNTIME DESTINATION bin)
