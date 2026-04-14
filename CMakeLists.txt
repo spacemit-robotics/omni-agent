@@ -108,6 +108,9 @@ find_path(AUDIO_INCLUDE_DIR NAMES audio_duplex.hpp REQUIRED)
 # stt
 find_library(STT_LIB NAMES stt REQUIRED)
 find_library(SENSEVOICE_LIB NAMES sensevoice REQUIRED)
+find_library(ZIPFORMER_LIB NAMES zipformer REQUIRED)
+find_library(KALDI_FBANK_LIB NAMES kaldi-native-fbank-core REQUIRED)
+find_library(SPACEMIT_EP_LIB NAMES spacemit_ep)  # optional, K3 only
 find_path(STT_INCLUDE_DIR NAMES asr_service.h REQUIRED)
 
 # tts (headers installed to include/tts/)
@@ -184,6 +187,9 @@ set(VOICE_AGENT_LIBS
     ${SAMPLERATE_LIBRARIES}
     ${STT_LIB}
     ${SENSEVOICE_LIB}
+    ${ZIPFORMER_LIB}
+    ${KALDI_FBANK_LIB}
+    ${SPACEMIT_EP_LIB}
     ${TTS_LIB}
     ${VAD_LIB}
     ${SILERO_VAD_LIB}
