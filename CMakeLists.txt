@@ -110,12 +110,23 @@ find_library(STT_LIB NAMES stt REQUIRED)
 find_library(SENSEVOICE_LIB NAMES sensevoice REQUIRED)
 find_library(ZIPFORMER_LIB NAMES zipformer REQUIRED)
 find_library(KALDI_FBANK_LIB NAMES kaldi-native-fbank-core REQUIRED)
+find_library(KISSFFT_FLOAT_LIB NAMES kissfft-float kissfft_float kissfft REQUIRED)
 find_library(SPACEMIT_EP_LIB NAMES spacemit_ep)  # optional, K3 only
 find_path(STT_INCLUDE_DIR NAMES asr_service.h REQUIRED)
 
 # tts (headers installed to include/tts/)
 find_library(TTS_LIB NAMES tts REQUIRED)
+find_library(KALDIFST_CORE_LIB NAMES kaldifst_core)
+find_library(KALDIFST_FST_LIB NAMES kaldifst_fst fst)
 find_path(TTS_INCLUDE_DIR NAMES tts_service.h PATH_SUFFIXES tts REQUIRED)
+
+if(KALDIFST_CORE_LIB AND KALDIFST_FST_LIB)
+    message(STATUS "kaldifst support enabled: ${KALDIFST_CORE_LIB}, ${KALDIFST_FST_LIB}")
+elseif(KALDIFST_CORE_LIB OR KALDIFST_FST_LIB)
+    message(FATAL_ERROR "Incomplete kaldifst libraries found. Need both kaldifst_core and kaldifst_fst/fst for libtts.a.")
+else()
+    message(STATUS "kaldifst libraries not found; assuming libtts.a was built with TTS_USE_FST=OFF")
+endif()
 
 # vad
 find_library(VAD_LIB NAMES vad REQUIRED)
@@ -189,8 +200,11 @@ set(VOICE_AGENT_LIBS
     ${SENSEVOICE_LIB}
     ${ZIPFORMER_LIB}
     ${KALDI_FBANK_LIB}
+    ${KISSFFT_FLOAT_LIB}
     ${SPACEMIT_EP_LIB}
     ${TTS_LIB}
+    ${KALDIFST_CORE_LIB}
+    ${KALDIFST_FST_LIB}
     ${VAD_LIB}
     ${SILERO_VAD_LIB}
     ${LLM_LIB}
@@ -342,4 +356,3 @@ if(USE_VP)
 endif()
 
 install(TARGETS voice_chat RUNTIME DESTINATION bin)
-
