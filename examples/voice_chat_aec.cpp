@@ -193,7 +193,7 @@ void listAudioDevices() {
     std::cout << getTimestamp() << " ========================================\n\n";
 
     std::cout << getTimestamp() << " 输入设备 (麦克风):\n";
-    auto input_devices = SpaceAudio::AudioDuplex::ListInputDevices();
+    auto input_devices = SpacemitAudio::AudioDuplex::ListInputDevices();
     if (input_devices.empty()) {
         std::cout << getTimestamp() << "   (无可用设备)\n";
     } else {
@@ -203,7 +203,7 @@ void listAudioDevices() {
     }
 
     std::cout << getTimestamp() << " \n输出设备 (扬声器):\n";
-    auto output_devices = SpaceAudio::AudioDuplex::ListOutputDevices();
+    auto output_devices = SpacemitAudio::AudioDuplex::ListOutputDevices();
     if (output_devices.empty()) {
         std::cout << getTimestamp() << "   (无可用设备)\n";
     } else {
