@@ -190,7 +190,7 @@ void listAudioDevices() {
     std::cout << getTimestamp() << " ========================================\n\n";
 
     std::cout << getTimestamp() << " 输入设备 (麦克风):\n";
-    auto input_devices = SpaceAudio::AudioCapture::ListDevices();
+    auto input_devices = SpacemitAudio::AudioCapture::ListDevices();
     if (input_devices.empty()) {
         std::cout << getTimestamp() << "   (无可用设备)\n";
     } else {
@@ -200,7 +200,7 @@ void listAudioDevices() {
     }
 
     std::cout << getTimestamp() << " \n输出设备 (扬声器):\n";
-    auto output_devices = SpaceAudio::AudioPlayer::ListDevices();
+    auto output_devices = SpacemitAudio::AudioPlayer::ListDevices();
     if (output_devices.empty()) {
         std::cout << getTimestamp() << "   (无可用设备)\n";
     } else {
@@ -279,8 +279,8 @@ int main(int argc, char* argv[]) {
     // -------------------------------------------------------------------------
     std::cout << getTimestamp() << " [5/5] 初始化音频设备..." << std::flush;
 
-    SpaceAudio::AudioCapture capture(cfg.input_device);
-    SpaceAudio::AudioPlayer player(cfg.output_device);
+    SpacemitAudio::AudioCapture capture(cfg.input_device);
+    SpacemitAudio::AudioPlayer player(cfg.output_device);
 
     // 初始化录音重采样器（capture_rate != 16kHz 时使用）
     std::unique_ptr<Resampler> capture_resampler;

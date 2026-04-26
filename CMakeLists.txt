@@ -101,7 +101,7 @@ include_directories(${FFTW3_INCLUDE_DIRS})
 # ============================================================================
 
 # audio
-find_library(SPACE_AUDIO_LIB NAMES space_audio REQUIRED)
+find_library(SPACEMIT_AUDIO_LIB NAMES spacemit_audio REQUIRED)
 find_library(AUDIO_RESAMPLER_LIB NAMES audio_resampler REQUIRED)
 find_path(AUDIO_INCLUDE_DIR NAMES audio_duplex.hpp REQUIRED)
 
@@ -182,7 +182,7 @@ set(VOICE_AGENT_INCLUDE_DIRS
 )
 
 set(VOICE_AGENT_LIBS
-    ${SPACE_AUDIO_LIB}
+    ${SPACEMIT_AUDIO_LIB}
     ${AUDIO_RESAMPLER_LIB}
     ${SAMPLERATE_LIBRARIES}
     ${STT_LIB}

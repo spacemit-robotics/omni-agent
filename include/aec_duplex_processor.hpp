@@ -6,7 +6,7 @@
 /**
  * AecDuplexProcessor - AEC processor using AudioDuplex
  *
- * Integrates WebRTC APM with SpaceAudio::AudioDuplex for echo cancellation.
+ * Integrates WebRTC APM with SpacemitAudio::AudioDuplex for echo cancellation.
  * Uses the full-duplex stream for automatic time alignment between
  * microphone input and speaker output.
  *
@@ -41,14 +41,14 @@ namespace webrtc {
 class AudioProcessing;
 }
 
-namespace SpaceAudio {
+namespace SpacemitAudio {
 class AudioDuplex;
 }
 
 /**
  * AEC Full-Duplex Processor
  *
- * Combines SpaceAudio::AudioDuplex with WebRTC APM for echo cancellation.
+ * Combines SpacemitAudio::AudioDuplex with WebRTC APM for echo cancellation.
  * Barge-in detection should be done at the application layer using VAD.
  */
 class AecDuplexProcessor {
@@ -192,8 +192,8 @@ private:
     // Configuration
     Config config_;
 
-    // SpaceAudio duplex stream
-    std::unique_ptr<SpaceAudio::AudioDuplex> duplex_;
+    // SpacemitAudio duplex stream
+    std::unique_ptr<SpacemitAudio::AudioDuplex> duplex_;
 
     // WebRTC APM
     webrtc::AudioProcessing* apm_;
