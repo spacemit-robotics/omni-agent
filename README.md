@@ -41,7 +41,7 @@ SpacemiT 语音对话系统，集成 VAD + ASR + LLM + TTS + MCP 工具调用的
 ```bash
 # 环境初始化
 source build/envsetup.sh
-lunch k3-com260-minimal    # 或其他目标
+lunch k3-com260-omni-agent
 
 # 一键编译（构建 omni_agent 及其所有依赖）
 m
@@ -63,21 +63,21 @@ cd application/native/omni_agent && mm -DUSE_MCP=OFF
 
 ### 运行
 
-> LLM 服务启动方式参见 [llm 组件](<!-- TODO: 补充 llm 组件仓库链接 -->)。
+> LLM 服务启动方式参见 [llm 组件](../../components/model_zoo/llm/)。
 
 ```bash
 # 最简运行
 voice_chat -i 0 -o 0 --llm-url http://localhost:8080
 
 # 指定模型和 TTS
-voice_chat --llm-url http://localhost:8080 --model qwen2.5:7b --tts matcha:zn-en
+voice_chat --llm-url http://localhost:8080 --model qwen2.5:7b --tts matcha:zh-en
 
-# 启用 MCP 工具调用（MCP 服务开发和启动参见 [mcp 组件](<!-- TODO: 补充 mcp 组件仓库链接 -->)）
+# 启用 MCP 工具调用（MCP 服务开发和启动参见 [mcp 组件](../../components/agent_tools/mcp/)）
 # 安装依赖（建议开虚拟环境）
 pip install mcp starlette uvicorn psutil
 # 启动注册中心
-./components/smart_voice/mcp/examples/start_all_services.sh
-voice_chat --llm-url http://localhost:8080 --mcp-config ./components/smart_voice/mcp/examples/configs/config_registry.json
+./components/agent_tools/mcp/examples/start_all_services.sh
+voice_chat --llm-url http://localhost:8080 --mcp-config ./components/agent_tools/mcp/examples/configs/config_registry.json
 ```
 
 ## 两种模式
@@ -103,6 +103,11 @@ voice_chat --llm-url http://localhost:8080 --mcp-config ./components/smart_voice
 | `--mcp-config <path>` | | | MCP 配置文件路径 |
 | `--list-voices` | | | 列出 Kokoro 可用音色 |
 | `--save-audio [file]` | | | 保存录音（默认 `voice_debug.wav`） |
+| `-vp` | | | 启用声纹验证 |
+| `--vp-verify <name>` | | | 验证是否匹配指定说话人 |
+| `--vp-database <path>` | | `speakers.db` | 声纹数据库文件路径 |
+| `--vp-threshold <val>` | | `0.6` | 声纹验证阈值 |
+| `--vp-threads <n>` | | `1` | 声纹推理线程数 |
 
 **TTS 后端选项**：`matcha:zh` / `matcha:en` / `matcha:zh-en` / `kokoro` / `kokoro:<voice>`
 
@@ -248,7 +253,7 @@ voice_chat --llm-url http://localhost:8080 --model qwen2.5:7b --mcp-config confi
 
 ### 编写 MCP 服务
 
-MCP 服务可以用任何语言实现。详细的开发指南和示例参见 [mcp 组件](<!-- TODO: 补充 mcp 组件仓库链接 -->)。
+MCP 服务可以用任何语言实现。详细的开发指南和示例参见 [mcp 组件](../../components/agent_tools/mcp/)。
 
 Python 示例服务：
 
@@ -256,7 +261,6 @@ Python 示例服务：
 - `services/time/` — 时间查询 (stdio_server.py / socket_server.py / http_server.py)
 - `services/system_monitor/` — 系统监控 (http_server.py)
 
-C 语言 MCP 服务（用于嵌入式设备）参见 `components/smart_voice/mlink/device/`，通过 `mlink_tool_create()` 注册工具。
 
 ## 架构
 
