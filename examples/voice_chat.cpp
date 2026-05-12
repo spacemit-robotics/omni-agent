@@ -49,7 +49,7 @@
 // ============================================================================
 
 struct Config {
-    std::string tts_type = "matcha:zh";
+    std::string tts_type = "matcha:zh-en";
     bool list_voices = false;
     std::string llm_model = "qwen2.5:0.5b";
     std::string llm_url = "";
@@ -58,6 +58,7 @@ struct Config {
     float vad_threshold = 0.8f;
     float silence_duration = 0.5f;
     int max_tokens = 150;
+    std::string system_prompt = "You are a helpful assistant.";
     bool list_devices = false;
 
     // Audio config (independent capture/playback)
@@ -120,6 +121,14 @@ Config parseArgs(int argc, char* argv[]) {
             }
         } else if (strcmp(argv[i], "--mcp-config") == 0 && i + 1 < argc) {
             cfg.mcp_config_path = argv[++i];
+        } else if (strcmp(argv[i], "--vad-threshold") == 0 && i + 1 < argc) {
+            cfg.vad_threshold = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--silence-duration") == 0 && i + 1 < argc) {
+            cfg.silence_duration = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--max-tokens") == 0 && i + 1 < argc) {
+            cfg.max_tokens = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--system-prompt") == 0 && i + 1 < argc) {
+            cfg.system_prompt = argv[++i];
 #ifdef USE_VP
         } else if (strcmp(argv[i], "--voiceprint") == 0 || strcmp(argv[i], "-vp") == 0) {
             cfg.vp_enabled = true;
@@ -154,8 +163,13 @@ Config parseArgs(int argc, char* argv[]) {
                 << "\nLLM:\n"
                 << "  --model <name>                LLM模型 (默认: qwen2.5:0.5b)\n"
                 << "  --llm-url <url>               LLM API地址 (必填)\n"
+                << "  --max-tokens <n>              最大生成 token 数 (默认: 150)\n"
+                << "  --system-prompt <text>        系统提示词\n"
+                << "\nVAD:\n"
+                << "  --vad-threshold <0-1>         VAD触发阈值 (默认: 0.8)\n"
+                << "  --silence-duration <sec>      静音结束判定时长 (默认: 0.5)\n"
                 << "\nTTS:\n"
-                << "  --tts <engine>                TTS后端 (默认: matcha:zh)\n"
+                << "  --tts <engine>                TTS后端 (默认: matcha:zh-en)\n"
                 << "                                matcha:zh / matcha:en / matcha:zh-en\n"
                 << "                                kokoro / kokoro:<voice>\n"
                 << "  --list-voices                 列出 Kokoro 可用音色\n"
@@ -258,7 +272,7 @@ int main(int argc, char* argv[]) {
     std::cout << getTimestamp() << " 按 Ctrl+C 退出\n";
     std::cout << getTimestamp() << " ========================================\n\n";
     // -------------------------------------------------------------------------
-    auto llm_result = initLLM(cfg.llm_model, cfg.llm_url, "You are a helpful assistant.", cfg.max_tokens);
+    auto llm_result = initLLM(cfg.llm_model, cfg.llm_url, cfg.system_prompt, cfg.max_tokens);
     if (!llm_result.llm) return 1;
     auto llm = llm_result.llm;
     auto system_prompt = llm_result.system_prompt;

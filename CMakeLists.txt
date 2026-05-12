@@ -356,3 +356,56 @@ if(USE_VP)
 endif()
 
 install(TARGETS voice_chat RUNTIME DESTINATION bin)
+
+# ============================================================================
+# voice_chat_daemon - "傻瓜化" launcher (manages llama-server + voice_chat)
+# ============================================================================
+add_executable(voice_chat_daemon
+    examples/voice_chat_daemon.cpp
+    src/daemon_config.cpp
+)
+
+target_include_directories(voice_chat_daemon PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${AUDIO_INCLUDE_DIR}
+    ${PORTAUDIO_INCLUDE_DIRS}
+)
+
+target_link_libraries(voice_chat_daemon
+    ${SPACEMIT_AUDIO_LIB}
+    ${PORTAUDIO_LIBRARIES}
+    pthread
+)
+
+target_link_directories(voice_chat_daemon PRIVATE
+    ${PORTAUDIO_LIBRARY_DIRS}
+)
+
+if(nlohmann_json_FOUND)
+    target_link_libraries(voice_chat_daemon nlohmann_json::nlohmann_json)
+elseif(NLOHMANN_JSON_INCLUDE_DIR)
+    target_include_directories(voice_chat_daemon PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
+else()
+    find_path(NLOHMANN_JSON_INCLUDE_DIR NAMES nlohmann/json.hpp REQUIRED)
+    target_include_directories(voice_chat_daemon PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
+endif()
+
+set_target_properties(voice_chat_daemon PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+if(APPLE)
+    set_target_properties(voice_chat_daemon PROPERTIES
+        INSTALL_RPATH "@executable_path/../lib"
+        BUILD_WITH_INSTALL_RPATH TRUE
+    )
+else()
+    set_target_properties(voice_chat_daemon PROPERTIES
+        INSTALL_RPATH "$ORIGIN/../lib"
+        BUILD_WITH_INSTALL_RPATH TRUE
+    )
+endif()
+
+message(STATUS "Building voice_chat_daemon (lightweight launcher)")
+
+install(TARGETS voice_chat_daemon RUNTIME DESTINATION bin)
