@@ -1,305 +1,185 @@
 # Omni Agent — 语音对话系统
 
-SpacemiT 语音对话系统，集成 VAD + ASR + LLM + TTS + MCP 工具调用的端到端语音交互方案。
-
-| 特性 | 说明 |
-|------|------|
-| 语音识别 | SenseVoice (16kHz) |
-| 语音合成 | Matcha-TTS / Kokoro |
-| 语音活动检测 | Silero VAD |
-| LLM | OpenAI 兼容 API (llama.cpp) |
-| 工具调用 | MCP (Model Context Protocol) |
-| 回声消除 | WebRTC AEC3 (可选) |
+SpacemiT 语音对话系统，集成 VAD + ASR + LLM + TTS + 声纹验证 + MCP 工具调用的端到端语音交互方案。
 
 ## 快速开始
 
-### 依赖
-
-**组件依赖**（由构建系统自动解析）：
-
-| 组件 | 说明 |
-|------|------|
-| `audio` | 音频采集/播放 + 重采样 |
-| `asr` | 语音识别 (SenseVoice) |
-| `tts` | 语音合成 (Matcha-TTS / Kokoro) |
-| `vad` | 语音活动检测 (Silero) |
-| `llm` | LLM 推理服务 |
-| `mcp` | MCP 客户端库 |
-
-**系统依赖**：
-
-| 包名 | 用途 |
-|------|------|
-| `portaudio19-dev` | 音频 I/O |
-| `libsndfile1-dev` | 音频文件读写 |
-| `libfftw3-dev` | FFT 运算 |
-| `libcurl4-openssl-dev` | HTTP 请求 |
-| `meson` + `ninja-build` | WebRTC AEC 构建（USE_AEC=ON 时需要） |
-
-### 构建
+`voice_chat_daemon` 是推荐的唯一用户入口，会自动匹配音频设备、启动本地 LLM、拉起 `voice_chat` 或 `voice_chat_aec`，并把日志写到 `~/.cache/omni_agent/logs/`。
 
 ```bash
-# 环境初始化
+sudo apt install llama.cpp-tools-spacemit
+
+voice_chat_daemon start
+voice_chat_daemon status
+voice_chat_daemon logs
+voice_chat_daemon stop
+```
+
+使用本地 LLM 时，需要先把 `llm.json.model_url` 对应的模型文件准备到 `llm.json.model_path`。不使用本地模型时，在 `llm.json` 配置 `api_base`、`api_key` 和 `model_name` 即可走云端 OpenAI-compatible API。
+
+首次 `start` 或 `--register-speaker` 会自动在 `~/.config/omni_agent/` 写入缺失的默认 JSON，已有文件不会覆盖。需要定制时直接编辑对应文件：
+
+```bash
+${EDITOR:-vi} ~/.config/omni_agent/voice_chat.json
+voice_chat_daemon stop && voice_chat_daemon start
+```
+
+查看合并后的有效配置：
+
+```bash
+voice_chat_daemon config-show
+```
+
+## 配置文件
+
+`config-init` 会在 `~/.config/omni_agent/` 下写入缺失的 5 个 JSON，已有文件不会覆盖。需要还原默认配置时使用 `config-init --force`，daemon 会先把现有目录备份为 `~/.config/omni_agent.backup-<timestamp>`，再覆盖写入默认 JSON。任一文件不存在、字段缺失或字段为 `null` 时使用内置默认；任一 JSON 语法错误时该文件使用默认值，其他文件继续生效。
+
+| 文件 | 职责 |
+| --- | --- |
+| `voice_chat.json` | 运行模式、音频设备、TTS、VAD、调试录音、daemon 日志和 PID 路径 |
+| `llm.json` | 本地 llama-server 或云端 OpenAI-compatible LLM、模型名、密钥、`max_tokens`、`system_prompt` |
+| `voiceprint.json` | 声纹验证开关、数据库、阈值、verify 目标 |
+| `mcp.json` | MCP client 开关、registry 和 servers；servers schema 复用 `components/agent_tools/mcp/examples/configs/` |
+| `aec.json` | `voice_chat_aec` 专用的 AEC/NS/AGC/delay/buffer 参数 |
+
+详细字段说明见 `docs/zh/k3/04-AI与算法/4.5-Agent.md`。
+
+## CLI 总览
+
+```text
+voice_chat_daemon start [--aec] [--mcp]
+voice_chat_daemon stop
+voice_chat_daemon status
+voice_chat_daemon logs
+voice_chat_daemon config-init [--force]
+voice_chat_daemon config-show
+voice_chat_daemon --register-speaker NAME [--force]
+```
+
+| 命令 | 说明 |
+| --- | --- |
+| `start [--aec] [--mcp]` | 启动 daemon；`--aec` 临时切到 `voice_chat_aec`，`--mcp` 临时启用 MCP |
+| `stop` | 停止 daemon、llama-server 和 voice_chat 子进程 |
+| `status` | 显示 daemon / llama / voice_chat PID 和当前日志路径 |
+| `logs` | `tail -f` 当前日志 |
+| `config-init [--force]` | 手动写入缺失的 5 个默认 JSON；`--force` 先备份再覆盖还原默认配置 |
+| `config-show` | 输出纯 JSON：5 段合并配置 + `_meta.load_status` |
+| `--register-speaker NAME [--force]` | 不启动 daemon，直接调用 `register_speaker` 进入 3 次录音注册流程 |
+
+## 场景示例
+
+启动软件 AEC：
+
+```bash
+voice_chat_daemon start --aec
+```
+
+临时启用 MCP：
+
+```bash
+voice_chat_daemon start --mcp
+cat ~/.cache/omni_agent/mcp_resolved.json
+```
+
+如果 `mcp.json` 没有配置 `servers` 或 `registry_url`，`--mcp` 会自动使用固定目录 `~/.local/share/omni_agent/mcp/services` 启动内置 MCP 服务（Calculator、TimeService、SystemMonitor）。首次运行时 daemon 会从 SDK 的 `components/agent_tools/mcp/examples` 同步一份到该固定目录，之后从任何工作目录启动都不再依赖源码路径。MCP Python 环境固定为 `~/.mcp-env`，daemon 只检查依赖，不会在启动时安装 Python 包；请预先安装 `mcp starlette uvicorn psutil flask`。自定义 MCP 服务时，直接编辑 `mcp.json` 的 `servers` 或 `registry_url`。
+
+MCP Python 环境准备示例：
+
+```bash
+python3 -m venv ~/.mcp-env
+~/.mcp-env/bin/python -m pip install mcp starlette uvicorn psutil flask
+```
+
+使用云端 OpenAI-compatible LLM：
+
+```bash
+${EDITOR:-vi} ~/.config/omni_agent/llm.json
+voice_chat_daemon start
+```
+
+在 `llm.json` 中设置 `api_base`、`api_key` 和 `model_name`。`api_base` 非空时 daemon 不会启动本地 `llama-server`；`api_key` 会通过 `OPENAI_API_KEY` 传给 `voice_chat`，不会出现在命令行参数中。
+
+DeepSeek 示例：
+
+```json
+{
+    "api_base": "https://api.deepseek.com",
+    "api_key": "sk-...",
+    "model_name": "deepseek-v4-flash"
+}
+```
+
+注册并启用声纹验证：
+
+```bash
+voice_chat_daemon --register-speaker alice
+${EDITOR:-vi} ~/.config/omni_agent/voiceprint.json
+voice_chat_daemon stop && voice_chat_daemon start
+```
+
+常用参数修改位置：
+
+| 需求 | 修改位置 |
+| --- | --- |
+| 换音频设备或采样率 | `voice_chat.json` 的 `audio` |
+| 调 VAD 灵敏度 | `voice_chat.json` 的 `vad.threshold` / `vad.silence_duration` |
+| 换模型、端口、线程数 | `llm.json` |
+| 调回复长度或系统提示词 | `llm.json` 的 `max_tokens` / `system_prompt` |
+| 启用声纹验证 | `voiceprint.json` 的 `enabled` / `verify` |
+| 启用 MCP 工具 | `mcp.json` 的 `enabled` / `servers` |
+| 调 AEC 参数 | `aec.json`，仅 `mode=voice_chat_aec` 生效 |
+
+## 构建
+
+```bash
 source build/envsetup.sh
 lunch k3-com260-omni-agent
 
-# 一键编译（构建 omni_agent 及其所有依赖）
-m
-
-# 标准构建（不含 AEC）
 cd application/native/omni_agent && mm
 
-# 启用 AEC 构建
+# 需要软件 AEC 时
 cd application/native/omni_agent && mm -DUSE_AEC=ON
-
-# 禁用 MCP
-cd application/native/omni_agent && mm -DUSE_MCP=OFF
 ```
 
 | CMake 选项 | 默认值 | 说明 |
-|-----------|--------|------|
+| --- | --- | --- |
 | `USE_MCP` | `ON` | MCP 工具调用支持 |
-| `USE_AEC` | `OFF` | WebRTC 回声消除（编译 `voice_chat_aec`） |
+| `USE_AEC` | `OFF` | 编译 `voice_chat_aec` |
+| `USE_VP` | `ON` | 声纹验证支持 |
 
-### 运行
+## 附录：底层调试工具
 
-> LLM 服务启动方式参见 [llm 组件](../../components/model_zoo/llm/)。
+普通使用不需要直接调用这些工具；它们保留用于向后兼容和问题定位。
 
-```bash
-# 最简运行
-voice_chat -i 0 -o 0 --llm-url http://localhost:8080
-
-# 指定模型和 TTS
-voice_chat --llm-url http://localhost:8080 --model qwen2.5:7b --tts matcha:zh-en
-
-# 启用 MCP 工具调用（MCP 服务开发和启动参见 [mcp 组件](../../components/agent_tools/mcp/)）
-# 安装依赖（建议开虚拟环境）
-pip install mcp starlette uvicorn psutil
-# 启动注册中心
-./components/agent_tools/mcp/examples/start_all_services.sh
-voice_chat --llm-url http://localhost:8080 --mcp-config ./components/agent_tools/mcp/examples/configs/config_registry.json
-```
-
-## 两种模式
-
-### voice_chat — 标准模式
-
-适用于硬件自带 AEC 或外接麦克风的场景。录音和播放使用独立的音频设备，录音默认 16kHz/1ch 直连 VAD/STT（零重采样），播放使用独立采样率。
-
-**参数列表**：
-
-| 参数 | 缩写 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--llm-url <url>` | | *必填* | LLM API 地址 |
-| `--model <name>` | | `qwen2.5:0.5b` | LLM 模型名称 |
-| `--tts <engine>` | | `matcha:zh` | TTS 后端（见下方说明） |
-| `--input-device <id>` | `-i` | 系统默认 | 输入设备索引 |
-| `--output-device <id>` | `-o` | 系统默认 | 输出设备索引 |
-| `--list-devices` | `-l` | | 列出可用音频设备 |
-| `--capture-rate <hz>` | | `16000` | 录音采样率 |
-| `--capture-channels <n>` | | `1` | 录音声道数 |
-| `--playback-rate <hz>` | | `48000` | 播放采样率 |
-| `--playback-channels <n>` | | `1` | 播放声道数 |
-| `--mcp-config <path>` | | | MCP 配置文件路径 |
-| `--list-voices` | | | 列出 Kokoro 可用音色 |
-| `--save-audio [file]` | | | 保存录音（默认 `voice_debug.wav`） |
-| `-vp` | | | 启用声纹验证 |
-| `--vp-verify <name>` | | | 验证是否匹配指定说话人 |
-| `--vp-database <path>` | | `speakers.db` | 声纹数据库文件路径 |
-| `--vp-threshold <val>` | | `0.6` | 声纹验证阈值 |
-| `--vp-threads <n>` | | `1` | 声纹推理线程数 |
-
-**TTS 后端选项**：`matcha:zh` / `matcha:en` / `matcha:zh-en` / `kokoro` / `kokoro:<voice>`
-
-### voice_chat_aec — AEC 模式 (USE_AEC=ON)
-
-适用于需要软件回声消除的场景。使用全双工音频（48kHz），通过 WebRTC AEC3 实现回声消除，内部重采样到 16kHz 送 VAD/ASR。
-
-**额外/不同参数**：
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--sample-rate <hz>` | `48000` | 全双工音频采样率 |
-| `--no-aec` | | 禁用回声消除 |
-| `--no-ns` | | 禁用噪声抑制 |
-| `--agc` | | 启用自动增益控制（默认禁用） |
-| `--aec-delay <ms>` | `50` | AEC 延迟补偿（范围 20-100ms） |
-| `--buffer-frames <n>` | `480` | 音频缓冲帧数 |
-
-> `voice_chat_aec` 不支持 `--capture-rate`/`--playback-rate`，统一使用 `--sample-rate`。
-
-## Barge-in（用户打断）
-
-两种模式均支持用户打断正在播放的 TTS 回复：
-
-1. TTS 播放期间，VAD 持续检测麦克风输入
-2. 当检测到连续多帧语音活动（标准模式 5 帧 / AEC 模式 3 帧），判定为用户打断
-3. 立即停止 TTS 播放，中断 LLM 生成
-4. 保留已捕获的语音缓冲，开始新一轮识别
-
-## MCP 工具集成
-
-### 概述
-
-omni_agent 通过 [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) 支持 LLM 工具调用。运行时，omni_agent 作为 MCP 客户端连接外部工具服务，LLM 可以根据用户意图自动选择并调用工具，将结果融入对话。
-
-### 配置文件格式
-
-```json
-{
-  "backend": "llama",
-  "url": "http://localhost:8080",
-  "model": "qwen2.5:7b",
-  "timeout": 120,
-  "system_prompt": "你是一个智能助手，可以使用工具帮助用户。请用中文回复。",
-  "servers": [...],
-  "registry_url": "http://127.0.0.1:9000/mcp/services",
-  "registry_poll_interval": 5
-}
-```
-
-| 字段 | 必填 | 说明 |
-|------|------|------|
-| `backend` | 否 | LLM 后端类型（`llama` / `openai`） |
-| `url` | 是 | LLM API 地址（覆盖命令行 `--llm-url`） |
-| `model` | 是 | 模型名称（覆盖命令行 `--model`） |
-| `timeout` | 否 | 请求超时秒数，默认 120 |
-| `system_prompt` | 否 | 系统提示词（覆盖默认值） |
-| `servers` | 是 | MCP 服务列表 |
-| `registry_url` | 否 | 服务注册中心 URL |
-| `registry_poll_interval` | 否 | 注册中心轮询间隔（秒），默认 5 |
-
-### 服务连接方式
-
-支持三种 MCP 服务传输方式：
-
-**HTTP（Streamable HTTP）**：
-
-```json
-{
-  "name": "Calculator",
-  "type": "http",
-  "url": "http://localhost:8001/mcp"
-}
-```
-
-**stdio（标准输入/输出）**：
-
-```json
-{
-  "name": "Calculator",
-  "type": "stdio",
-  "command": "python3",
-  "args": ["examples/services/calculator/stdio_server.py"]
-}
-```
-
-**Unix Socket**：
-
-```json
-{
-  "name": "SystemMonitor",
-  "type": "socket",
-  "path": "/tmp/mcp_system_monitor.sock"
-}
-```
-
-### 服务注册中心
-
-配置 `registry_url` 后，omni_agent 会按 `registry_poll_interval` 秒轮询注册中心，自动发现新上线的 MCP 服务并连接，也会自动移除已下线的服务。适用于动态环境中服务数量不固定的场景。
-
-```json
-{
-  "url": "http://localhost:8080",
-  "model": "qwen2.5:7b",
-  "registry_url": "http://127.0.0.1:9000/mcp/services",
-  "registry_poll_interval": 5,
-  "servers": []
-}
-```
-
-### 完整示例
-
-以下配置同时使用 stdio 和 socket 两种服务：
-
-```json
-{
-  "backend": "llama",
-  "url": "http://localhost:8080",
-  "model": "qwen2.5:7b",
-  "timeout": 120,
-  "system_prompt": "你是一个智能助手，可以使用工具帮助用户。请用中文回复。",
-  "servers": [
-    {
-      "name": "Calculator",
-      "type": "stdio",
-      "command": "python3",
-      "args": ["examples/services/calculator/stdio_server.py"]
-    },
-    {
-      "name": "SystemMonitor",
-      "type": "socket",
-      "path": "/tmp/mcp_system_monitor.sock"
-    }
-  ]
-}
-```
-
-运行：
+### voice_chat
 
 ```bash
-voice_chat --llm-url http://localhost:8080 --model qwen2.5:7b --mcp-config config.json
+voice_chat --llm-url http://127.0.0.1:9191/v1 --model Qwen3-0.6B --tts matcha:zh-en
+voice_chat -l
 ```
 
-### 编写 MCP 服务
+常用参数包括 `-i/-o`、`--capture-rate`、`--playback-rate`、`--vad-threshold`、`--silence-duration`、`--max-tokens`、`--system-prompt`、`--mcp-config`、`-vp` 和 `--save-audio`。
 
-MCP 服务可以用任何语言实现。详细的开发指南和示例参见 [mcp 组件](../../components/agent_tools/mcp/)。
+### voice_chat_aec
 
-Python 示例服务：
-
-- `services/calculator/` — 计算器 (stdio_server.py / socket_server.py / http_server.py)
-- `services/time/` — 时间查询 (stdio_server.py / socket_server.py / http_server.py)
-- `services/system_monitor/` — 系统监控 (http_server.py)
-
-
-## 架构
-
-```
-voice_chat / voice_chat_aec
-    ├── AudioCapture ──→ [Resampler] ──→ VAD ──→ ASR
-    │   (16kHz/48kHz)     (→16kHz)     (Silero)  (SenseVoice)
-    │
-    ├── LLM (OpenAI 兼容 API)
-    │   └── MCP 工具调用（可选）
-    │
-    └── TTS ──→ [Resampler] ──→ AudioPlayer
-        (Matcha/Kokoro)  (→48kHz)
+```bash
+voice_chat_aec --llm-url http://127.0.0.1:9191/v1 --sample-rate 48000
 ```
 
-- **voice_chat**: AudioCapture + AudioPlayer 独立运行，录音直连 VAD/STT
-- **voice_chat_aec**: AecDuplexProcessor 全双工处理，WebRTC AEC3 消除回声后送 VAD/STT
+AEC 专用参数包括 `--no-aec`、`--no-ns`、`--agc`、`--aec-delay`、`--buffer-frames`。
 
-## 常见问题
+### 声纹工具
 
-**Q: 找不到音频设备？**
+```bash
+register_speaker -n alice -d ~/.cache/omni_agent/speakers.db
+identify_speaker -d ~/.cache/omni_agent/speakers.db sample.wav
+```
 
-运行 `voice_chat -l` 列出所有可用设备，然后用 `-i <id> -o <id>` 指定。
+推荐注册入口仍是：
 
-**Q: 模型文件在哪里？**
-
-ONNX 模型文件由各组件（stt/tts/vad）自动管理，首次运行时从预设路径加载。确保已正确构建并安装对应组件。
-
-**Q: 软回采 AEC 效果不好，如何调优？**
-
-- 调整 `--aec-delay`：增大延迟补偿值（默认 50ms）可改善远端回声消除
-- 确认 `--sample-rate` 与硬件实际采样率匹配
-- 使用 `--save-audio` 录制 AEC 处理后的音频进行分析
-- 在安静环境下先用 `--no-aec` 确认基本流程正常
-
-**Q: LLM 响应慢？**
-
-- 使用更小的模型（如 `qwen2.5:0.5b`）
-- 检查网络延迟（`--llm-url` 指向的服务是否可达）
+```bash
+voice_chat_daemon --register-speaker alice
+```
 
 ## License
 
