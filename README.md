@@ -87,7 +87,12 @@ MCP Python 环境准备示例：
 
 ```bash
 python3 -m venv ~/.mcp-env
-~/.mcp-env/bin/python -m pip install mcp starlette uvicorn psutil flask
+~/.mcp-env/bin/python -m pip install flask mcp starlette uvicorn psutil \
+    --prefer-binary \
+    --retries 0 \
+    --timeout 2 \
+    --index-url https://git.spacemit.com/api/v4/projects/33/packages/pypi/simple \
+    --extra-index-url https://mirrors.aliyun.com/pypi/simple/
 ```
 
 使用云端 OpenAI-compatible LLM：

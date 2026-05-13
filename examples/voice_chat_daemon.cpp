@@ -19,6 +19,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <portaudio.h>
 #include <signal.h>
@@ -133,17 +134,32 @@ bool BinaryOnPath(const std::string& name) {
 }
 
 bool PortInUse(const std::string& host, int port) {
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) {
+    struct addrinfo hints {};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo* result = nullptr;
+    const std::string service = std::to_string(port);
+    int gai = getaddrinfo(host.c_str(), service.c_str(), &hints, &result);
+    if (gai != 0) {
         return false;
     }
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-    inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
-    int rc = connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-    close(s);
-    return rc == 0;
+
+    bool connected = false;
+    for (struct addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
+        int s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (s < 0) {
+            continue;
+        }
+        if (connect(s, rp->ai_addr, rp->ai_addrlen) == 0) {
+            connected = true;
+            close(s);
+            break;
+        }
+        close(s);
+    }
+    freeaddrinfo(result);
+    return connected;
 }
 
 bool WaitPortReady(const std::string& host, int port, int timeout_sec) {
@@ -1464,8 +1480,6 @@ void PrintUsage(const char* prog) {
         << "\n顶层模式:\n"
         << "  --register-speaker NAME [--force]\n"
         << "                  直接进入声纹注册流程，完成后退出\n"
-        << "\n依赖:\n"
-        << "  sudo apt install llama.cpp-tools-spacemit\n"
         << "\n示例:\n"
         << "  " << prog << " start                    # 一键启动\n"
         << "  " << prog << " start --aec              # AEC 模式启动\n"
