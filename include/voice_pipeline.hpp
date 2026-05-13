@@ -25,6 +25,7 @@
 using PlaybackCallback = std::function<void(const std::vector<float>& samples, int sample_rate)>;
 using IsPlayingCallback = std::function<bool()>;
 using ClearPlaybackCallback = std::function<void()>;
+using SaveTtsAudioCallback = std::function<void(const std::vector<uint8_t>& pcm16_bytes)>;
 
 struct VoicePipelineContext {
     std::shared_ptr<spacemit_llm::LLMService> llm;
@@ -35,6 +36,7 @@ struct VoicePipelineContext {
     PlaybackCallback enqueue_playback;
     IsPlayingCallback is_playing;
     ClearPlaybackCallback clear_playback;
+    SaveTtsAudioCallback save_tts_audio;
 
     // State variables (references from main)
     std::vector<float>* audio_buffer;
@@ -55,6 +57,7 @@ struct VoicePipelineContext {
 #endif
 };
 
+void playStartupGreeting(VoicePipelineContext& ctx, const std::string& greeting);
 void processText(VoicePipelineContext& ctx, const std::string& text);
 
 #endif  // VOICE_PIPELINE_HPP

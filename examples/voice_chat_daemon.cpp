@@ -8,6 +8,7 @@
  *
  * 用户入口:
  *   start [--aec] [--mcp]
+ *   restart [--aec] [--mcp]
  *   stop
  *   status
  *   logs
@@ -795,6 +796,32 @@ bool WaitMcpExamplePortsReady(int timeout_sec) {
     return false;
 }
 
+bool IsDefaultMcpExampleUrl(const std::string& url) {
+    return url == "http://127.0.0.1:8001/mcp"
+        || url == "http://127.0.0.1:8002/mcp"
+        || url == "http://127.0.0.1:8003/mcp";
+}
+
+bool UsesDefaultMcpExampleServices(const json& servers) {
+    if (!servers.is_array()) {
+        return false;
+    }
+    for (const auto& server : servers) {
+        if (!server.is_object()) {
+            continue;
+        }
+        const std::string type = server.value("type", "http");
+        if (type != "http") {
+            continue;
+        }
+        const std::string url = server.value("url", "");
+        if (IsDefaultMcpExampleUrl(url)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool StopMcpExampleServices() {
     std::string services_dir = EnsureMcpServicesDir();
     if (services_dir.empty()) {
@@ -805,16 +832,14 @@ bool StopMcpExampleServices() {
     return true;
 }
 
-bool EnsureZeroConfigMcpServices(DaemonConfig& cfg, bool& auto_started) {
+bool EnsureConfiguredMcpExampleServices(const DaemonConfig& cfg, bool& auto_started) {
     auto_started = false;
-    if (!cfg.mcp.enabled || !cfg.mcp.servers.empty() || !cfg.mcp.registry_url.empty()) {
+    if (!cfg.mcp.enabled || !UsesDefaultMcpExampleServices(cfg.mcp.servers)) {
         return true;
     }
 
-    cfg.mcp.registry_url = "http://127.0.0.1:9000/mcp/services";
     if (McpExamplePortsReady()) {
-        std::cerr << "[info] MCP services already running; using registry "
-            << cfg.mcp.registry_url << "\n";
+        std::cerr << "[info] MCP example services already running\n";
         return true;
     }
 
@@ -829,7 +854,8 @@ bool EnsureZeroConfigMcpServices(DaemonConfig& cfg, bool& auto_started) {
 
     std::string script = services_dir + "/start_all_services.sh";
     std::string path = BuildMcpPythonPath(python_bin);
-    std::cerr << "[info] starting MCP services: " << script << "\n";
+    std::cerr << "[info] starting configured MCP example services: "
+        << script << "\n";
     int rc = RunSyncWithEnv(script, {"start"}, {{"PATH", path}});
     if (rc != 0) {
         std::cerr << "错误: MCP 服务启动失败 (rc=" << rc << ")\n";
@@ -848,8 +874,7 @@ bool EnsureZeroConfigMcpServices(DaemonConfig& cfg, bool& auto_started) {
     }
 
     auto_started = true;
-    std::cerr << "[info] MCP services ready; using registry "
-        << cfg.mcp.registry_url << "\n";
+    std::cerr << "[info] MCP example services ready\n";
     return true;
 }
 
@@ -912,10 +937,10 @@ int CmdRegisterSpeaker(const std::string& name, bool force) {
 // start 子命令
 // -----------------------------------------------------------------------------
 
-int CmdStart(int argc, char** argv) {
-    bool aec_override = false;
-    bool mcp_override = false;
-
+bool ParseStartOptions(int argc, char** argv,
+        bool& aec_override, bool& mcp_override) {
+    aec_override = false;
+    mcp_override = false;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--aec") {
@@ -924,8 +949,17 @@ int CmdStart(int argc, char** argv) {
             mcp_override = true;
         } else {
             std::cerr << "未知参数: " << a << "\n";
-            return 2;
+            return false;
         }
+    }
+    return true;
+}
+
+int CmdStart(int argc, char** argv) {
+    bool aec_override = false;
+    bool mcp_override = false;
+    if (!ParseStartOptions(argc, argv, aec_override, mcp_override)) {
+        return 2;
     }
 
     if (!EnsureDefaultConfigs()) {
@@ -1044,7 +1078,7 @@ int CmdStart(int argc, char** argv) {
     }
 
     bool mcp_auto_started = false;
-    if (!EnsureZeroConfigMcpServices(cfg, mcp_auto_started)) {
+    if (!EnsureConfiguredMcpExampleServices(cfg, mcp_auto_started)) {
         return 1;
     }
 
@@ -1214,6 +1248,14 @@ int CmdStart(int argc, char** argv) {
         "--max-tokens", std::to_string(cfg.llm.max_tokens),
         "--system-prompt", cfg.llm.system_prompt,
     };
+    if (cfg.llm.reasoning_budget >= 0) {
+        vc_args.push_back("--reasoning-budget");
+        vc_args.push_back(std::to_string(cfg.llm.reasoning_budget));
+    }
+    if (!cfg.startup_greeting.empty()) {
+        vc_args.push_back("--startup-greeting");
+        vc_args.push_back(cfg.startup_greeting);
+    }
     if (cfg.mode == "voice_chat_aec") {
         if (aec_sample_rate_set && aec_sample_rate == 48000) {
             vc_args.push_back("--sample-rate");
@@ -1255,6 +1297,10 @@ int CmdStart(int argc, char** argv) {
     if (cfg.debug.save_audio) {
         vc_args.push_back("--save-audio");
         vc_args.push_back(cfg.debug.save_audio_file);
+    }
+    if (cfg.debug.save_tts_audio) {
+        vc_args.push_back("--save-tts-audio");
+        vc_args.push_back(cfg.debug.save_tts_audio_file);
     }
     if (cfg.voiceprint.enabled) {
         vc_args.push_back("-vp");
@@ -1436,6 +1482,20 @@ int CmdStop() {
     return 0;
 }
 
+int CmdRestart(int argc, char** argv) {
+    bool aec_override = false;
+    bool mcp_override = false;
+    if (!ParseStartOptions(argc, argv, aec_override, mcp_override)) {
+        return 2;
+    }
+
+    int rc = CmdStop();
+    if (rc != 0) {
+        return rc;
+    }
+    return CmdStart(argc, argv);
+}
+
 int CmdStatus() {
     DaemonConfig cfg = omni_agent::LoadConfig();
     PrintConfigLoadErrors(cfg);
@@ -1532,6 +1592,8 @@ void PrintUsage(const char* prog) {
         << "                  启动 omni_agent daemon\n"
         << "                  --aec  临时切换 voice_chat_aec\n"
         << "                  --mcp  临时启用 MCP client\n"
+        << "  restart [--aec] [--mcp]\n"
+        << "                  重启 daemon，参数同 start\n"
         << "  stop            停止 daemon 及其所有子进程\n"
         << "  status          查看运行状态\n"
         << "  logs            tail -f 当前 log 文件\n"
@@ -1546,6 +1608,7 @@ void PrintUsage(const char* prog) {
         << "  " << prog << " start                    # 一键启动\n"
         << "  " << prog << " start --aec              # AEC 模式启动\n"
         << "  " << prog << " start --mcp              # 临时启用 MCP\n"
+        << "  " << prog << " restart --mcp            # 重启并启用 MCP\n"
         << "  " << prog << " --register-speaker alice # 注册声纹\n"
         << "  " << prog << " stop                     # 关闭\n";
 }
@@ -1571,6 +1634,9 @@ int main(int argc, char** argv) {
     std::string cmd = argv[1];
     if (cmd == "start") {
         return CmdStart(argc, argv);
+    }
+    if (cmd == "restart") {
+        return CmdRestart(argc, argv);
     }
     if (cmd == "stop") {
         return CmdStop();

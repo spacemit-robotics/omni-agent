@@ -5,10 +5,14 @@
 
 #include "voice_pipeline.hpp"
 
+#include <chrono>
 #include <deque>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include "text_buffer.hpp"
@@ -19,7 +23,161 @@
 
 #include "mcp_helper.hpp"
 using json = nlohmann::json;
+
+namespace {
+
+struct PendingToolCall {
+    std::string id;
+    std::string name;
+    json args;
+};
+
+void trimConversationHistory(std::vector<spacemit_llm::ChatMessage>* messages) {
+    constexpr size_t kMaxNonSystemMessages = 24;
+
+    size_t non_system_count = 0;
+    for (const auto& msg : *messages) {
+        if (msg.role != spacemit_llm::ChatMessage::Role::SYSTEM) {
+            non_system_count++;
+        }
+    }
+    if (non_system_count <= kMaxNonSystemMessages) return;
+
+    std::vector<spacemit_llm::ChatMessage> system_messages;
+    std::vector<spacemit_llm::ChatMessage> non_system_messages;
+    system_messages.reserve(messages->size());
+    non_system_messages.reserve(non_system_count);
+
+    for (const auto& msg : *messages) {
+        if (msg.role == spacemit_llm::ChatMessage::Role::SYSTEM) {
+            system_messages.push_back(msg);
+        } else {
+            non_system_messages.push_back(msg);
+        }
+    }
+
+    size_t start = non_system_messages.size() - kMaxNonSystemMessages;
+    while (start < non_system_messages.size() &&
+            non_system_messages[start].role == spacemit_llm::ChatMessage::Role::TOOL) {
+        start++;
+    }
+
+    std::vector<spacemit_llm::ChatMessage> trimmed = std::move(system_messages);
+    trimmed.insert(trimmed.end(), non_system_messages.begin() + start, non_system_messages.end());
+    messages->swap(trimmed);
+}
+
+bool collectValidToolCalls(const std::string& tool_calls_json,
+        std::vector<PendingToolCall>* pending_calls,
+        json* valid_tool_calls) {
+    auto tool_calls = json::parse(tool_calls_json);
+    *valid_tool_calls = json::array();
+
+    for (const auto& tc : tool_calls) {
+        std::string tc_id = tc.value("id", "");
+        if (tc_id.empty()) {
+            tc_id = "call_" + std::to_string(pending_calls->size());
+        }
+
+        if (!tc.contains("function") || !tc["function"].is_object()) {
+            std::cerr << getTimestamp() << " [MCP] 跳过非法工具调用: 缺少 function\n";
+            continue;
+        }
+
+        const auto& fn = tc["function"];
+        if (!fn.contains("name") || !fn["name"].is_string() ||
+                !fn.contains("arguments")) {
+            std::cerr << getTimestamp() << " [MCP] 跳过非法工具调用: 字段不完整\n";
+            continue;
+        }
+
+        std::string tool_name = fn["name"].get<std::string>();
+        json tool_args;
+        const json& raw_args = fn["arguments"];
+        if (raw_args.is_string()) {
+            try {
+                tool_args = json::parse(raw_args.get<std::string>());
+            } catch (const std::exception& e) {
+                std::cerr << getTimestamp() << " [MCP] 跳过非法工具调用参数: "
+                    << tool_name << " (" << e.what() << ")\n";
+                continue;
+            }
+        } else {
+            tool_args = raw_args;
+        }
+
+        if (!tool_args.is_object()) {
+            std::cerr << getTimestamp() << " [MCP] 跳过非法工具调用参数: "
+                << tool_name << " 参数不是 JSON object\n";
+            continue;
+        }
+
+        valid_tool_calls->push_back({
+            {"id", tc_id},
+            {"type", tc.value("type", "function")},
+            {"function", {
+                {"name", tool_name},
+                {"arguments", tool_args.dump()}
+            }}
+        });
+        pending_calls->push_back({tc_id, tool_name, tool_args});
+    }
+
+    return !pending_calls->empty();
+}
+
+}  // namespace
 #endif
+
+void playStartupGreeting(VoicePipelineContext& ctx, const std::string& greeting) {
+    if (greeting.empty() || !g_running) return;
+
+    g_processing = true;
+    g_barge_in = false;
+
+    std::cout << getTimestamp() << " [启动问候]: " << greeting << "\n";
+    auto result = ctx.tts->Call(greeting);
+    if (result && result->IsSuccess() && g_running) {
+        std::cout << getTimestamp() << " [TTS] 启动问候 "
+            << result->GetDurationMs() << "ms, "
+            << "RTF=" << std::fixed << std::setprecision(3)
+            << result->GetRTF() << "\n";
+        auto audio_bytes = result->GetAudioData();
+        if (!audio_bytes.empty()) {
+            if (ctx.save_tts_audio) {
+                ctx.save_tts_audio(audio_bytes);
+            }
+            auto float_samples = pcm16BytesToFloat(audio_bytes);
+            ctx.enqueue_playback(float_samples, ctx.tts_sample_rate);
+
+            auto wait_start = std::chrono::steady_clock::now();
+            while (g_running && !ctx.is_playing() &&
+                    std::chrono::steady_clock::now() - wait_start <
+                        std::chrono::milliseconds(500)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            while (g_running && ctx.is_playing()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+    } else {
+        std::cerr << getTimestamp() << " [TTS] 启动问候合成失败\n";
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(*ctx.buffer_mutex);
+        ctx.audio_buffer->clear();
+        ctx.pre_buffer->clear();
+        *ctx.silence_frames = 0;
+        *ctx.is_speaking = false;
+    }
+    *ctx.barge_in_recording = false;
+    ctx.vad_frame_buffer->clear();
+    ctx.vad->Reset();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    g_processing = false;
+}
 
 void processText(VoicePipelineContext& ctx, const std::string& text) {
     if (text.empty()) return;
@@ -49,6 +207,9 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
                 << "RTF=" << std::fixed << std::setprecision(3) << result->GetRTF() << "\n";
             auto audio_bytes = result->GetAudioData();
             if (!audio_bytes.empty()) {
+                if (ctx.save_tts_audio) {
+                    ctx.save_tts_audio(audio_bytes);
+                }
                 auto float_samples = pcm16BytesToFloat(audio_bytes);
                 ctx.enqueue_playback(float_samples, ctx.tts_sample_rate);
             }
@@ -60,6 +221,7 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
         {
             std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
             ctx.conversation_messages->push_back(spacemit_llm::ChatMessage::User(text));
+            trimConversationHistory(ctx.conversation_messages);
         }
 
         const int MAX_TOOL_ROUNDS = 10;
@@ -118,33 +280,39 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
             if (result.HasToolCalls()) {
                 std::cout << getTimestamp() << " [Tool Call] 检测到工具调用\n";
 
-                {
-                    std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
-                    ctx.conversation_messages->push_back(
-                        spacemit_llm::ChatMessage::Assistant(
-                            result.content,
-                            result.tool_calls_json,
-                            result.reasoning_content));
-                }
-
                 try {
-                    auto tool_calls = json::parse(result.tool_calls_json);
-                    for (const auto& tc : tool_calls) {
-                        std::string tool_name = tc["function"]["name"];
-                        json tool_args = tc["function"]["arguments"];
-
-                        if (tool_args.is_string()) {
-                            try {
-                                tool_args = json::parse(tool_args.get<std::string>());
-                            } catch (...) {}
+                    std::vector<PendingToolCall> pending_calls;
+                    json valid_tool_calls;
+                    if (!collectValidToolCalls(result.tool_calls_json,
+                            &pending_calls, &valid_tool_calls)) {
+                        std::cerr << getTimestamp() << " [MCP] 本轮工具调用全部无效，已忽略\n";
+                        {
+                            std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
+                            ctx.conversation_messages->push_back(
+                                spacemit_llm::ChatMessage::Assistant(
+                                    "工具调用参数格式错误，请重新提问。"));
+                            trimConversationHistory(ctx.conversation_messages);
                         }
+                        synthesizeSentence("工具调用参数格式错误，请重新提问。");
+                        break;
+                    }
 
-                        std::string server = ctx.mcp_manager->findServerForTool(tool_name);
-                        std::cout << getTimestamp() << " [MCP] 调用: " << tool_name
+                    {
+                        std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
+                        ctx.conversation_messages->push_back(
+                            spacemit_llm::ChatMessage::Assistant(
+                                result.content,
+                                valid_tool_calls.dump(),
+                                result.reasoning_content));
+                    }
+
+                    for (const auto& call : pending_calls) {
+                        std::string server = ctx.mcp_manager->findServerForTool(call.name);
+                        std::cout << getTimestamp() << " [MCP] 调用: " << call.name
                             << " @ " << server << " 参数: "
-                            << tool_args.dump() << std::endl;
+                            << call.args.dump() << std::endl;
 
-                        auto tool_result = ctx.mcp_manager->callTool(tool_name, tool_args);
+                        auto tool_result = ctx.mcp_manager->callTool(call.name, call.args);
 
                         std::string result_text;
                         if (tool_result.success && !tool_result.contents.empty()) {
@@ -157,12 +325,15 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
 
                         std::cout << getTimestamp() << " [MCP] 结果: " << result_text << std::endl;
 
-                        std::string tc_id = tc.value("id", "");
                         {
                             std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
                             ctx.conversation_messages->push_back(
-                                spacemit_llm::ChatMessage::Tool(result_text, tc_id));
+                                spacemit_llm::ChatMessage::Tool(result_text, call.id));
                         }
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
+                        trimConversationHistory(ctx.conversation_messages);
                     }
                 } catch (const std::exception& e) {
                     std::cerr << getTimestamp() << " [MCP] 工具调用解析错误: " << e.what() << std::endl;

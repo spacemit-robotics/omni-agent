@@ -45,8 +45,11 @@ const char* kVoiceChatConfigTemplate = R"({
     },
     "debug": {
         "save_audio":      false,
-        "save_audio_file": "voice_debug.wav"
+        "save_audio_file": "voice_debug.wav",
+        "save_tts_audio":      false,
+        "save_tts_audio_file": "tts_debug.wav"
     },
+    "startup_greeting": "你好，请问有什么可以帮到您？",
     "log_dir":  "~/.cache/omni_agent/logs",
     "pid_file": "~/.cache/omni_agent/voice_chat_daemon.pid"
 }
@@ -59,9 +62,9 @@ const char* kLlmConfigTemplate = R"({
     "server_binary":     "llama-server",
     "server_host":       "127.0.0.1",
     "server_port":       9191,
-    "model_path":        "~/.cache/models/llm/Qwen3-0.6B-Q4_0.gguf",
-    "model_url":         "https://archive.spacemit.com/spacemit-ai/model_zoo/llm/Qwen3-0.6B-Q4_0.gguf",
-    "model_name":        "Qwen3-0.6B",
+    "model_path":        "~/.cache/models/llm/qwen2.5-0.5b-instruct-q4_0.gguf",
+    "model_url":         "https://archive.spacemit.com/spacemit-ai/model_zoo/llm/qwen2.5-0.5b-instruct-q4_0.gguf",
+    "model_name":        "qwen2.5-0.5b",
     "ctx_size":          4096,
     "threads":           4,
     "reasoning_budget":  0,
@@ -88,7 +91,23 @@ const char* kMcpConfigTemplate = R"({
     "timeout":  120,
     "registry_url":           null,
     "registry_poll_interval": 5,
-    "servers": []
+    "servers": [
+        {
+            "name": "Calculator",
+            "type": "http",
+            "url":  "http://127.0.0.1:8001/mcp"
+        },
+        {
+            "name": "TimeService",
+            "type": "http",
+            "url":  "http://127.0.0.1:8002/mcp"
+        },
+        {
+            "name": "SystemMonitor",
+            "type": "http",
+            "url":  "http://127.0.0.1:8003/mcp"
+        }
+    ]
 }
 )";
 
@@ -169,6 +188,7 @@ void ParseVoiceChat(const json& j, DaemonConfig& cfg) {
     std::string tts = cfg.tts;
     VadCfg vad = cfg.vad;
     DebugCfg debug = cfg.debug;
+    std::string startup_greeting = cfg.startup_greeting;
     std::string log_dir = cfg.log_dir;
     std::string pid_file = cfg.pid_file;
 
@@ -182,7 +202,10 @@ void ParseVoiceChat(const json& j, DaemonConfig& cfg) {
     if (auto it = j.find("debug"); it != j.end() && it->is_object()) {
         GetOpt(*it, "save_audio", debug.save_audio);
         GetOpt(*it, "save_audio_file", debug.save_audio_file);
+        GetOpt(*it, "save_tts_audio", debug.save_tts_audio);
+        GetOpt(*it, "save_tts_audio_file", debug.save_tts_audio_file);
     }
+    GetOpt(j, "startup_greeting", startup_greeting);
     GetOpt(j, "log_dir", log_dir);
     GetOpt(j, "pid_file", pid_file);
 
@@ -191,6 +214,7 @@ void ParseVoiceChat(const json& j, DaemonConfig& cfg) {
     cfg.tts = tts;
     cfg.vad = vad;
     cfg.debug = debug;
+    cfg.startup_greeting = startup_greeting;
     cfg.log_dir = log_dir;
     cfg.pid_file = pid_file;
 }
@@ -295,6 +319,7 @@ bool LoadJson(const std::string& path, LoadStatus& status, json& out) {
 
 void ExpandPathFields(DaemonConfig& cfg) {
     cfg.debug.save_audio_file = ExpandUser(cfg.debug.save_audio_file);
+    cfg.debug.save_tts_audio_file = ExpandUser(cfg.debug.save_tts_audio_file);
     cfg.llm.model_path = ExpandUser(cfg.llm.model_path);
     cfg.voiceprint.database = ExpandUser(cfg.voiceprint.database);
     cfg.log_dir = ExpandUser(cfg.log_dir);
@@ -345,7 +370,10 @@ json VoiceChatJson(const DaemonConfig& cfg) {
     j["debug"] = {
         {"save_audio", cfg.debug.save_audio},
         {"save_audio_file", cfg.debug.save_audio_file},
+        {"save_tts_audio", cfg.debug.save_tts_audio},
+        {"save_tts_audio_file", cfg.debug.save_tts_audio_file},
     };
+    j["startup_greeting"] = cfg.startup_greeting;
     j["log_dir"] = cfg.log_dir;
     j["pid_file"] = cfg.pid_file;
     return j;
