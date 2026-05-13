@@ -41,6 +41,10 @@ struct DebugCfg {
     bool save_audio = false;
     // 保存录音调试文件的路径。
     std::string save_audio_file = "voice_debug.wav";
+    // 是否保存 TTS 输出音频。
+    bool save_tts_audio = false;
+    // 保存 TTS 输出音频的路径。
+    std::string save_tts_audio_file = "tts_debug.wav";
 };
 
 struct LlmCfg {
@@ -57,17 +61,17 @@ struct LlmCfg {
     // llama-server 监听端口。
     int server_port = 9191;
     // GGUF 模型本地路径。
-    std::string model_path = "~/.cache/models/llm/Qwen3-0.6B-Q4_0.gguf";
+    std::string model_path = "~/.cache/models/llm/qwen2.5-0.5b-instruct-q4_0.gguf";
     // 模型缺失时输出给用户的参考下载 URL。
     std::string model_url =
-        "https://archive.spacemit.com/spacemit-ai/model_zoo/llm/Qwen3-0.6B-Q4_0.gguf";
+        "https://archive.spacemit.com/spacemit-ai/model_zoo/llm/qwen2.5-0.5b-instruct-q4_0.gguf";
     // 传给 voice_chat --model 的模型名称。
-    std::string model_name = "Qwen3-0.6B";
+    std::string model_name = "qwen2.5-0.5b";
     // llama-server 上下文长度。
     int ctx_size = 4096;
     // llama-server 推理线程数。
     int threads = 4;
-    // Qwen3/DeepSeek-R1 等 thinking 模型的 reasoning budget；-1 表示不传。
+    // Qwen/DeepSeek-R1 等 thinking 模型的 reasoning budget；-1 表示不传。
     int reasoning_budget = 0;
     // 追加给 llama-server 的原始参数。
     std::vector<std::string> extra_args;
@@ -137,6 +141,8 @@ struct DaemonConfig {
     std::string tts = "matcha:zh-en";
     VadCfg vad;
     DebugCfg debug;
+    // 子进程完全初始化后播放的开机问候；空字符串表示不播放。
+    std::string startup_greeting = "你好，请问有什么可以帮到您？";
     LlmCfg llm;
     VoiceprintCfg voiceprint;
     McpCfg mcp;

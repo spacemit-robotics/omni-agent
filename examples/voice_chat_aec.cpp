@@ -53,7 +53,9 @@ struct Config {
     float vad_threshold = 0.8f;
     float silence_duration = 0.5f;
     int max_tokens = 150;
+    int reasoning_budget = -1;
     std::string system_prompt = "You are a helpful assistant.";
+    std::string startup_greeting;
     bool list_devices = false;
 
     // AEC 配置
@@ -67,6 +69,8 @@ struct Config {
     // 调试：音频录制
     bool save_audio = false;
     std::string audio_file = "aec_debug.wav";
+    bool save_tts_audio = false;
+    std::string tts_audio_file = "tts_debug.wav";
 
     // MCP 配置
     std::string mcp_config_path = "";
@@ -120,6 +124,11 @@ Config parseArgs(int argc, char* argv[]) {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 cfg.audio_file = argv[++i];
             }
+        } else if (strcmp(argv[i], "--save-tts-audio") == 0) {
+            cfg.save_tts_audio = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                cfg.tts_audio_file = argv[++i];
+            }
         } else if (strcmp(argv[i], "--mcp-config") == 0 && i + 1 < argc) {
             cfg.mcp_config_path = argv[++i];
         } else if (strcmp(argv[i], "--vad-threshold") == 0 && i + 1 < argc) {
@@ -128,8 +137,12 @@ Config parseArgs(int argc, char* argv[]) {
             cfg.silence_duration = std::stof(argv[++i]);
         } else if (strcmp(argv[i], "--max-tokens") == 0 && i + 1 < argc) {
             cfg.max_tokens = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--reasoning-budget") == 0 && i + 1 < argc) {
+            cfg.reasoning_budget = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--system-prompt") == 0 && i + 1 < argc) {
             cfg.system_prompt = argv[++i];
+        } else if (strcmp(argv[i], "--startup-greeting") == 0 && i + 1 < argc) {
+            cfg.startup_greeting = argv[++i];
 #ifdef USE_VP
         } else if (strcmp(argv[i], "--voiceprint") == 0 || strcmp(argv[i], "-vp") == 0) {
             cfg.vp_enabled = true;
@@ -160,6 +173,7 @@ Config parseArgs(int argc, char* argv[]) {
                 << "  --model <name>            LLM模型 (默认: qwen2.5:0.5b)\n"
                 << "  --llm-url <url>           LLM API地址 (必填)\n"
                 << "  --max-tokens <n>          最大生成 token 数 (默认: 150)\n"
+                << "  --reasoning-budget <n>    reasoning budget；0 表示隐藏思考输出\n"
                 << "  --system-prompt <text>    系统提示词\n"
                 << "\nVAD:\n"
                 << "  --vad-threshold <0-1>     VAD触发阈值 (默认: 0.8)\n"
@@ -169,6 +183,7 @@ Config parseArgs(int argc, char* argv[]) {
                 << "                            matcha:zh / matcha:en / matcha:zh-en\n"
                 << "                            kokoro / kokoro:<voice>\n"
                 << "  --list-voices             列出 Kokoro 可用音色\n"
+                << "  --startup-greeting <text> 启动完成后播放的问候语\n"
                 << "\nAEC:\n"
                 << "  --no-aec                  禁用回声消除\n"
                 << "  --no-ns                   禁用噪声抑制\n"
@@ -178,6 +193,7 @@ Config parseArgs(int argc, char* argv[]) {
                 << "  --sample-rate <hz>        音频采样率 (默认: 48000, 常用: 44100, 48000)\n"
                 << "\n调试:\n"
                 << "  --save-audio [file]       保存AEC处理后的音频 (默认: aec_debug.wav)\n"
+                << "  --save-tts-audio [file]   保存TTS输出 (默认: tts_debug.wav)\n"
                 << "\nMCP:\n"
                 << "  --mcp-config <path>       MCP配置文件 (启用工具调用)\n"
                 << "\n声纹识别 (Voiceprint):\n"
@@ -291,6 +307,7 @@ std::vector<float> resampleToAec(const std::vector<float>& input, int from_rate,
 
 int main(int argc, char* argv[]) {
     signal(SIGINT, signalHandler);
+    signal(SIGTERM, signalHandler);
 
     Config cfg = parseArgs(argc, argv);
 
@@ -336,6 +353,9 @@ int main(int argc, char* argv[]) {
     auto llm_result = initLLM(cfg.llm_model, cfg.llm_url, cfg.system_prompt, cfg.max_tokens);
     if (!llm_result.llm) return 1;
     auto llm = llm_result.llm;
+    if (cfg.reasoning_budget >= 0) {
+        llm->update_reasoning_budget(cfg.reasoning_budget);
+    }
     auto system_prompt = llm_result.system_prompt;
 
     auto vad = initVAD(cfg.vad_threshold);
@@ -432,6 +452,8 @@ int main(int argc, char* argv[]) {
 
     std::vector<int16_t> recorded_audio;
     std::mutex record_mutex;
+    std::vector<int16_t> tts_recorded_audio;
+    std::mutex tts_record_mutex;
 
     const size_t VAD_FRAME_SIZE = 512;
     std::vector<float> vad_frame_buffer;
@@ -445,6 +467,18 @@ int main(int argc, char* argv[]) {
     pipeline_ctx.vad = vad;
     pipeline_ctx.tts_sample_rate = tts_sample_rate;
     pipeline_ctx.system_prompt = system_prompt;
+    if (cfg.save_tts_audio) {
+        pipeline_ctx.save_tts_audio = [&](const std::vector<uint8_t>& pcm16_bytes) {
+            std::lock_guard<std::mutex> lock(tts_record_mutex);
+            size_t samples = pcm16_bytes.size() / sizeof(int16_t);
+            tts_recorded_audio.reserve(tts_recorded_audio.size() + samples);
+            for (size_t i = 0; i < samples; ++i) {
+                uint16_t sample = static_cast<uint16_t>(pcm16_bytes[i * 2]) |
+                    (static_cast<uint16_t>(pcm16_bytes[i * 2 + 1]) << 8);
+                tts_recorded_audio.push_back(static_cast<int16_t>(sample));
+            }
+        };
+    }
     pipeline_ctx.enqueue_playback = [&](const std::vector<float>& samples, int rate) {
         auto audio_aec = resampleToAec(samples, rate, cfg.sample_rate);
         aec_processor.enqueuePlayback(audio_aec, cfg.sample_rate);
@@ -685,12 +719,13 @@ int main(int argc, char* argv[]) {
     // -------------------------------------------------------------------------
     // 开始对话
     // -------------------------------------------------------------------------
-    std::cout << getTimestamp() << " [等待语音输入...]\n" << std::flush;
-
     if (!aec_processor.start()) {
         std::cerr << getTimestamp() << " 错误: 无法启动音频处理\n";
         return 1;
     }
+
+    playStartupGreeting(pipeline_ctx, cfg.startup_greeting);
+    std::cout << getTimestamp() << " [等待语音输入...]\n" << std::flush;
 
     while (g_running) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -722,6 +757,12 @@ int main(int argc, char* argv[]) {
             << " (" << recorded_audio.size() << " samples, "
             << (recorded_audio.size() / 16000.0f) << " 秒)\n";
         saveWav(cfg.audio_file, recorded_audio, 16000);
+    }
+    if (cfg.save_tts_audio && !tts_recorded_audio.empty()) {
+        std::cout << getTimestamp() << " [保存TTS音频] " << cfg.tts_audio_file
+            << " (" << tts_recorded_audio.size() << " samples, "
+            << (tts_recorded_audio.size() / static_cast<double>(tts_sample_rate)) << " 秒)\n";
+        saveWav(cfg.tts_audio_file, tts_recorded_audio, tts_sample_rate);
     }
 
     std::cout << "\n" << getTimestamp() << " [已退出]\n";
