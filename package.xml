@@ -15,6 +15,7 @@
   <system_depend check="pkg-config --exists sndfile">libsndfile1-dev</system_depend>
   <system_depend check="pkg-config --exists fftw3f">libfftw3-dev</system_depend>
   <system_depend check="pkg-config --exists libcurl">libcurl4-openssl-dev</system_depend>
+  <system_depend check="test -f /usr/include/nlohmann/json.hpp || pkg-config --exists nlohmann_json">nlohmann-json3-dev</system_depend>
   <system_depend>llama.cpp-tools-spacemit</system_depend>
   <system_depend check="meson --version">meson</system_depend>
   <system_depend check="ninja --version">ninja-build</system_depend>
