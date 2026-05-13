@@ -417,6 +417,21 @@ bool WritePidFile(const std::string& path, const PidRecord& rec) {
     return true;
 }
 
+void WriteStartupStatus(int fd, char status) {
+    if (fd < 0) {
+        return;
+    }
+    struct sigaction ignore{};
+    struct sigaction old{};
+    ignore.sa_handler = SIG_IGN;
+    sigemptyset(&ignore.sa_mask);
+    sigaction(SIGPIPE, &ignore, &old);
+    ssize_t n = write(fd, &status, 1);
+    (void)n;
+    sigaction(SIGPIPE, &old, nullptr);
+    close(fd);
+}
+
 std::string TrimTrailingSlash(std::string api_base) {
     while (!api_base.empty() && api_base.back() == '/') {
         api_base.pop_back();
@@ -1055,22 +1070,50 @@ int CmdStart(int argc, char** argv) {
     std::string log_path = log_dir + "/voice_chat-" + Timestamp() + ".log";
 
     // 7. double-fork daemon
+    int startup_pipe[2];
+    if (pipe(startup_pipe) != 0) {
+        std::perror("pipe");
+        stop_mcp_if_started();
+        return 1;
+    }
+    fcntl(startup_pipe[0], F_SETFL, O_NONBLOCK);
+    fcntl(startup_pipe[1], F_SETFD, FD_CLOEXEC);
+
     pid_t p1 = fork();
     if (p1 < 0) {
         std::perror("fork");
+        close(startup_pipe[0]);
+        close(startup_pipe[1]);
         stop_mcp_if_started();
         return 1;
     }
     if (p1 > 0) {
+        close(startup_pipe[1]);
         const int startup_wait_ticks = start_local_llm ? 700 : 100;
+        bool startup_failed = false;
         for (int i = 0; i < startup_wait_ticks; ++i) {
-            if (FileExists(pid_file)) {
+            char status = 0;
+            ssize_t n = read(startup_pipe[0], &status, 1);
+            if (n == 1) {
+                if (status != '1') {
+                    startup_failed = true;
+                }
+                break;
+            }
+            if (n == 0) {
+                startup_failed = true;
+                break;
+            }
+            if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                startup_failed = true;
                 break;
             }
             usleep(100 * 1000);
         }
+        close(startup_pipe[0]);
         PidRecord started;
-        if (!ReadPidFile(pid_file, &started) || !ProcessAlive(started.daemon_pid)) {
+        if (startup_failed || !ReadPidFile(pid_file, &started) ||
+                !ProcessAlive(started.daemon_pid)) {
             std::cerr << "错误: voice_chat_daemon 启动失败，未生成有效 PID 文件\n";
             std::cerr << "  log: " << log_path << "\n";
             stop_mcp_if_started();
@@ -1082,14 +1125,18 @@ int CmdStart(int argc, char** argv) {
         std::cout << "  status: voice_chat_daemon status\n";
         return 0;
     }
+    close(startup_pipe[0]);
     if (setsid() < 0) {
+        WriteStartupStatus(startup_pipe[1], '0');
         _exit(1);
     }
     pid_t p2 = fork();
     if (p2 < 0) {
+        WriteStartupStatus(startup_pipe[1], '0');
         _exit(1);
     }
     if (p2 > 0) {
+        close(startup_pipe[1]);
         _exit(0);
     }
     if (chdir("/") != 0) {
@@ -1099,6 +1146,7 @@ int CmdStart(int argc, char** argv) {
 
     int fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) {
+        WriteStartupStatus(startup_pipe[1], '0');
         _exit(1);
     }
     dup2(fd, STDOUT_FILENO);
@@ -1141,6 +1189,7 @@ int CmdStart(int argc, char** argv) {
         llama_pid = SpawnAsync(cfg.llm.server_binary, args);
         if (llama_pid < 0) {
             std::cerr << "错误: 启动 llama-server 失败\n";
+            WriteStartupStatus(startup_pipe[1], '0');
             stop_mcp_if_started();
             return 1;
         }
@@ -1148,6 +1197,7 @@ int CmdStart(int argc, char** argv) {
             std::cerr << "错误: llama-server 60 秒内未就绪 (port "
                 << cfg.llm.server_port << ")\n";
             kill(llama_pid, SIGTERM);
+            WriteStartupStatus(startup_pipe[1], '0');
             stop_mcp_if_started();
             return 1;
         }
@@ -1234,6 +1284,7 @@ int CmdStart(int argc, char** argv) {
     pid_t voice_pid = SpawnAsyncWithEnv(cfg.mode, vc_args, vc_env);
     if (voice_pid < 0) {
         std::cerr << "错误: 启动 " << cfg.mode << " 失败\n";
+        WriteStartupStatus(startup_pipe[1], '0');
         if (llama_pid > 0) {
             kill(llama_pid, SIGTERM);
         }
@@ -1251,6 +1302,7 @@ int CmdStart(int argc, char** argv) {
     rec.log_path = log_path;
     if (!WritePidFile(pid_file, rec)) {
         std::cerr << "错误: 写 PID 文件失败 " << pid_file << "\n";
+        WriteStartupStatus(startup_pipe[1], '0');
         if (voice_pid > 0) {
             kill(voice_pid, SIGTERM);
         }
@@ -1260,6 +1312,7 @@ int CmdStart(int argc, char** argv) {
         stop_mcp_if_started();
         return 1;
     }
+    WriteStartupStatus(startup_pipe[1], '1');
 
     // 12. 主循环
     while (!g_should_stop) {
@@ -1339,10 +1392,19 @@ int CmdStop() {
     PidRecord rec;
     if (!ReadPidFile(pid_file, &rec)) {
         std::cout << "voice_chat_daemon not running.\n";
+        std::cout << "如怀疑有残留进程，请检查: pgrep -af 'llama-server|voice_chat'\n";
         return 0;
     }
     if (!ProcessAlive(rec.daemon_pid)) {
         std::cout << "voice_chat_daemon not running (清理 stale PID 文件)\n";
+        if (rec.llama_pid > 0 && ProcessAlive(rec.llama_pid)) {
+            std::cout << "清理残留 llama-server pid=" << rec.llama_pid << "\n";
+            kill(rec.llama_pid, SIGKILL);
+        }
+        if (rec.voice_pid > 0 && ProcessAlive(rec.voice_pid)) {
+            std::cout << "清理残留 voice_chat pid=" << rec.voice_pid << "\n";
+            kill(rec.voice_pid, SIGKILL);
+        }
         unlink(pid_file.c_str());
         return 0;
     }
