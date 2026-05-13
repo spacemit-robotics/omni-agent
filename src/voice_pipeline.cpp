@@ -106,13 +106,25 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
 
             std::cout << std::endl;
 
+            if (result.cancelled && g_barge_in) {
+                std::cout << getTimestamp() << " [LLM] 已因 barge-in 中断生成\n";
+                break;
+            }
+            if (!result.error.empty()) {
+                g_processing = false;
+                return;
+            }
+
             if (result.HasToolCalls()) {
                 std::cout << getTimestamp() << " [Tool Call] 检测到工具调用\n";
 
                 {
                     std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
                     ctx.conversation_messages->push_back(
-                        spacemit_llm::ChatMessage::Assistant(result.content, result.tool_calls_json));
+                        spacemit_llm::ChatMessage::Assistant(
+                            result.content,
+                            result.tool_calls_json,
+                            result.reasoning_content));
                 }
 
                 try {

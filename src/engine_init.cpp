@@ -6,13 +6,15 @@
 #include "engine_init.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <exception>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <vector>
-#include <cstdlib>
 
 #include "voice_common.hpp"
 
@@ -22,6 +24,11 @@
 #include "mcp_helper.hpp"
 using json = nlohmann::json;
 #endif
+
+namespace {
+constexpr int kAsrWarmupSampleRate = 16000;
+constexpr int kAsrWarmupSamples = kAsrWarmupSampleRate / 2;  // 0.5s silence.
+}  // namespace
 
 LLMInitResult initLLM(const std::string& llm_model, const std::string& llm_url,
     const std::string& default_system_prompt, int max_tokens) {
@@ -62,6 +69,26 @@ std::shared_ptr<SpacemiT::AsrEngine> initASR() {
         return nullptr;
     }
     std::cout << " OK\n";
+
+    std::cout << getTimestamp() << " [3/5] ASR 预热..." << std::flush;
+    try {
+        const std::vector<float> silence(kAsrWarmupSamples, 0.0f);
+        auto t0 = std::chrono::steady_clock::now();
+        auto warmup_result = asr->Recognize(silence, kAsrWarmupSampleRate);
+        auto t1 = std::chrono::steady_clock::now();
+        auto warmup_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+        if (!warmup_result) {
+            std::cout << " WARN (no result, " << warmup_ms << " ms)\n";
+        } else {
+            std::cout << " OK (" << warmup_ms << " ms)\n";
+        }
+    } catch (const std::exception& e) {
+        std::cout << " WARN (" << e.what() << ")\n";
+    } catch (...) {
+        std::cout << " WARN (unknown error)\n";
+    }
     return asr;
 }
 
