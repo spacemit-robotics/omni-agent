@@ -14,8 +14,10 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "llm_health.hpp"
 #include "voice_common.hpp"
 
 #ifdef USE_MCP
@@ -37,10 +39,59 @@ LLMInitResult initLLM(const std::string& llm_model, const std::string& llm_url,
 
     const char* key_env = std::getenv("OPENAI_API_KEY");
     std::string api_key = key_env ? key_env : "";
+
+    std::cout << getTimestamp() << " [1/5] LLM 后端: " << llm_url << " ..."
+        << std::flush;
+
+    // 启动健康探针：用 libcurl 探测后端 /models（覆盖 http/https）。后端进程
+    // 刚起、模型还在 load 时，端口可能已开但 /models 尚未就绪，故对"连不上 /
+    // 无模型"做有限重试；鉴权/请求错（4xx，除 429）立即失败，重试无益。
+    constexpr int kProbeRetryTotalMs = 5000;
+    constexpr int kProbeRetryIntervalMs = 500;
+    constexpr int kProbePerTryTimeoutSec = 2;
+
+    omni_agent::LlmHealthResult health;
+    const auto deadline = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(kProbeRetryTotalMs);
+    bool waiting_printed = false;
+    while (true) {
+        health = omni_agent::ProbeLlmModels(llm_url, api_key, kProbePerTryTimeoutSec);
+        if (health.status == omni_agent::LlmHealthStatus::HEALTHY) {
+            break;
+        }
+        const bool fatal =
+            health.status == omni_agent::LlmHealthStatus::BAD_RESPONSE
+            && health.http_code >= 400 && health.http_code < 500
+            && health.http_code != 429;
+        if (fatal || std::chrono::steady_clock::now() >= deadline) {
+            break;
+        }
+        if (!waiting_printed) {
+            std::cout << " 等待后端就绪" << std::flush;
+            waiting_printed = true;
+        }
+        std::cout << "." << std::flush;
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(kProbeRetryIntervalMs));
+    }
+
+    if (health.status != omni_agent::LlmHealthStatus::HEALTHY) {
+        std::cout << " FAIL\n";
+        std::cerr << getTimestamp() << " 错误: LLM 不可用: " << health.detail
+            << " (http=" << health.http_code << ", url=" << llm_url << ")\n";
+        std::cerr << getTimestamp()
+            << "       请检查 llama-server 是否已启动并加载模型，"
+            << "或 llm.json 的 api_base/api_key 是否有效。\n";
+        return result;
+    }
+    std::cout << " OK (" << health.model_ids.size() << " model";
+    if (health.model_ids.size() != 1) {
+        std::cout << "s";
+    }
+    std::cout << ")\n";
+
     result.llm = std::make_shared<spacemit_llm::LLMService>(
         llm_model, llm_url, api_key, result.system_prompt, max_tokens);
-
-    std::cout << getTimestamp() << " [1/5] LLM 后端: " << llm_url << " OK\n";
 
     return result;
 }
