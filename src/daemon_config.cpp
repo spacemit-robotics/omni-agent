@@ -33,10 +33,24 @@ const char* kVoiceChatConfigTemplate = R"({
         "output_device_hints": ["SPV Composite", "USB Audio"],
         "input_device_id":  null,
         "output_device_id": null,
-        "capture_rate":     null,
-        "playback_rate":    null,
-        "capture_channels": 1,
-        "playback_channels": 1
+        "capture_rate":     16000,
+        "playback_rate":    16000,
+        "capture_channels": 4,
+        "playback_channels": 2,
+        "speech_channel":   1
+    },
+    "doa": {
+        "enabled": true,
+        "pick": [2, 3, 4],
+        "side_m": 0.063,
+        "positions": null,
+        "azimuth_offset_deg": 0.0,
+        "max_avg_seconds": 3.0,
+        "confidence_threshold": 0.1,
+        "margin_threshold": 0.6,
+        "quality_threshold": 0.0,
+        "closure_threshold_samples": 0.0,
+        "closure_threshold_fraction": 0.3
     },
     "tts": "matcha:zh-en",
     "vad": {
@@ -180,6 +194,26 @@ void ParseAudio(const json& j, AudioCfg& audio) {
     GetOpt(a, "playback_rate", audio.playback_rate);
     GetOpt(a, "capture_channels", audio.capture_channels);
     GetOpt(a, "playback_channels", audio.playback_channels);
+    GetOpt(a, "speech_channel", audio.speech_channel);
+}
+
+void ParseDoa(const json& j, DoaCfg& doa) {
+    auto it = j.find("doa");
+    if (it == j.end() || !it->is_object()) {
+        return;
+    }
+    const json& d = *it;
+    GetOpt(d, "enabled", doa.enabled);
+    GetOpt(d, "pick", doa.pick);
+    GetOpt(d, "side_m", doa.side_m);
+    GetOpt(d, "positions", doa.positions);
+    GetOpt(d, "azimuth_offset_deg", doa.azimuth_offset_deg);
+    GetOpt(d, "max_avg_seconds", doa.max_avg_seconds);
+    GetOpt(d, "confidence_threshold", doa.confidence_threshold);
+    GetOpt(d, "margin_threshold", doa.margin_threshold);
+    GetOpt(d, "quality_threshold", doa.quality_threshold);
+    GetOpt(d, "closure_threshold_samples", doa.closure_threshold_samples);
+    GetOpt(d, "closure_threshold_fraction", doa.closure_threshold_fraction);
 }
 
 void ParseVoiceChat(const json& j, DaemonConfig& cfg) {
@@ -188,12 +222,14 @@ void ParseVoiceChat(const json& j, DaemonConfig& cfg) {
     std::string tts = cfg.tts;
     VadCfg vad = cfg.vad;
     DebugCfg debug = cfg.debug;
+    DoaCfg doa = cfg.doa;
     std::string startup_greeting = cfg.startup_greeting;
     std::string log_dir = cfg.log_dir;
     std::string pid_file = cfg.pid_file;
 
     GetOpt(j, "mode", mode);
     ParseAudio(j, audio);
+    ParseDoa(j, doa);
     GetOpt(j, "tts", tts);
     if (auto it = j.find("vad"); it != j.end() && it->is_object()) {
         GetOpt(*it, "threshold", vad.threshold);
@@ -214,6 +250,7 @@ void ParseVoiceChat(const json& j, DaemonConfig& cfg) {
     cfg.tts = tts;
     cfg.vad = vad;
     cfg.debug = debug;
+    cfg.doa = doa;
     cfg.startup_greeting = startup_greeting;
     cfg.log_dir = log_dir;
     cfg.pid_file = pid_file;
@@ -358,10 +395,26 @@ json VoiceChatJson(const DaemonConfig& cfg) {
     audio["playback_rate"] = PositiveOrNull(cfg.audio.playback_rate);
     audio["capture_channels"] = cfg.audio.capture_channels;
     audio["playback_channels"] = cfg.audio.playback_channels;
+    audio["speech_channel"] = cfg.audio.speech_channel;
+
+    json doa = {
+        {"enabled", cfg.doa.enabled},
+        {"pick", cfg.doa.pick},
+        {"side_m", cfg.doa.side_m},
+        {"positions", cfg.doa.positions.empty() ? json(nullptr) : json(cfg.doa.positions)},
+        {"azimuth_offset_deg", cfg.doa.azimuth_offset_deg},
+        {"max_avg_seconds", cfg.doa.max_avg_seconds},
+        {"confidence_threshold", cfg.doa.confidence_threshold},
+        {"margin_threshold", cfg.doa.margin_threshold},
+        {"quality_threshold", cfg.doa.quality_threshold},
+        {"closure_threshold_samples", cfg.doa.closure_threshold_samples},
+        {"closure_threshold_fraction", cfg.doa.closure_threshold_fraction},
+    };
 
     json j;
     j["mode"] = cfg.mode;
     j["audio"] = audio;
+    j["doa"] = doa;
     j["tts"] = cfg.tts;
     j["vad"] = {
         {"threshold", cfg.vad.threshold},

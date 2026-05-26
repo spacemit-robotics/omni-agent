@@ -56,6 +56,42 @@ using json = nlohmann::json;
 // 辅助函数
 // -----------------------------------------------------------------------------
 
+class ScopedStderrSilencer {
+public:
+    ScopedStderrSilencer() {
+        original_fd_ = dup(fileno(stderr));
+        if (original_fd_ < 0) {
+            return;
+        }
+        null_stream_ = fopen("/dev/null", "w");
+        if (!null_stream_) {
+            close(original_fd_);
+            original_fd_ = -1;
+            return;
+        }
+        fflush(stderr);
+        dup2(fileno(null_stream_), fileno(stderr));
+    }
+
+    ~ScopedStderrSilencer() {
+        if (original_fd_ >= 0) {
+            fflush(stderr);
+            dup2(original_fd_, fileno(stderr));
+            close(original_fd_);
+        }
+        if (null_stream_) {
+            fclose(null_stream_);
+        }
+    }
+
+    ScopedStderrSilencer(const ScopedStderrSilencer&) = delete;
+    ScopedStderrSilencer& operator=(const ScopedStderrSilencer&) = delete;
+
+private:
+    int original_fd_ = -1;
+    FILE* null_stream_ = nullptr;
+};
+
 std::string Timestamp() {
     char buf[64];
     std::time_t t = std::time(nullptr);
@@ -338,6 +374,27 @@ void PrintHints(const std::vector<std::string>& hints) {
         std::cerr << (i ? ", " : "") << "\"" << hints[i] << "\"";
     }
     std::cerr << "]\n";
+}
+
+bool GetDeviceMaxChannels(bool input, int device_id, int& max_channels) {
+    max_channels = 0;
+    ScopedStderrSilencer silencer;
+    PaError err = Pa_Initialize();
+    if (err != paNoError) {
+        std::cerr << "[warn] PortAudio 初始化失败，无法读取设备声道数: "
+            << Pa_GetErrorText(err) << "\n";
+        return false;
+    }
+
+    const int pa_id = device_id >= 0
+        ? device_id
+        : (input ? Pa_GetDefaultInputDevice() : Pa_GetDefaultOutputDevice());
+    const PaDeviceInfo* info = pa_id >= 0 ? Pa_GetDeviceInfo(pa_id) : nullptr;
+    if (info) {
+        max_channels = input ? info->maxInputChannels : info->maxOutputChannels;
+    }
+    Pa_Terminate();
+    return info != nullptr;
 }
 
 bool ResolveDevice(const char* kind,
@@ -902,9 +959,35 @@ int CmdRegisterSpeaker(const std::string& name, bool force) {
     PrintConfigLoadErrors(cfg);
 
     int input_id = cfg.audio.input_device_id;
-    auto in_devs = SpacemitAudio::AudioCapture::ListDevices();
+    std::vector<std::pair<int, std::string>> in_devs;
+    {
+        ScopedStderrSilencer silencer;
+        in_devs = SpacemitAudio::AudioCapture::ListDevices();
+    }
     if (!ResolveDevice("输入", cfg.audio.input_device_id,
             cfg.audio.input_device_hints, in_devs, input_id)) {
+        return 1;
+    }
+
+    int register_channels = cfg.audio.capture_channels;
+    int speech_channel = cfg.audio.speech_channel;
+    int max_input_channels = 0;
+    if (GetDeviceMaxChannels(true, input_id, max_input_channels) &&
+            max_input_channels > 0 && register_channels > max_input_channels) {
+        std::cerr << "[warn] 配置 capture_channels=" << register_channels
+            << "，但输入设备最多只有 " << max_input_channels
+            << " 路，声纹注册已自动降级\n";
+        register_channels = max_input_channels;
+    }
+    if (speech_channel > register_channels) {
+        std::cerr << "[warn] speech_channel=" << speech_channel
+            << " 超出声纹注册录音声道数 " << register_channels
+            << "，已改为 ch1\n";
+        speech_channel = 1;
+    }
+    if (register_channels < 1) {
+        std::cerr << "错误: 声纹注册录音声道数必须至少为 1，当前为 "
+            << register_channels << "\n";
         return 1;
     }
 
@@ -920,7 +1003,8 @@ int CmdRegisterSpeaker(const std::string& name, bool force) {
         "-d", cfg.voiceprint.database,
         "-t", std::to_string(cfg.voiceprint.threads),
         "-r", std::to_string(sample_rate),
-        "-c", std::to_string(cfg.audio.capture_channels),
+        "-c", std::to_string(register_channels),
+        "--speech-channel", std::to_string(speech_channel),
     };
     if (input_id >= 0) {
         args.push_back("-i");
@@ -937,16 +1021,30 @@ int CmdRegisterSpeaker(const std::string& name, bool force) {
 // start 子命令
 // -----------------------------------------------------------------------------
 
+std::string JoinInts(const std::vector<int>& values, char sep) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i) oss << sep;
+        oss << values[i];
+    }
+    return oss.str();
+}
+
 bool ParseStartOptions(int argc, char** argv,
-        bool& aec_override, bool& mcp_override) {
+        bool& aec_override, bool& mcp_override, int& doa_override) {
     aec_override = false;
     mcp_override = false;
+    doa_override = -1;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--aec") {
             aec_override = true;
         } else if (a == "--mcp") {
             mcp_override = true;
+        } else if (a == "--doa") {
+            doa_override = 1;
+        } else if (a == "--no-doa") {
+            doa_override = 0;
         } else {
             std::cerr << "未知参数: " << a << "\n";
             return false;
@@ -958,7 +1056,8 @@ bool ParseStartOptions(int argc, char** argv,
 int CmdStart(int argc, char** argv) {
     bool aec_override = false;
     bool mcp_override = false;
-    if (!ParseStartOptions(argc, argv, aec_override, mcp_override)) {
+    int doa_override = -1;
+    if (!ParseStartOptions(argc, argv, aec_override, mcp_override, doa_override)) {
         return 2;
     }
 
@@ -973,6 +1072,9 @@ int CmdStart(int argc, char** argv) {
     }
     if (mcp_override) {
         cfg.mcp.enabled = true;
+    }
+    if (doa_override >= 0) {
+        cfg.doa.enabled = doa_override != 0;
     }
     if (cfg.mode != "voice_chat" && cfg.mode != "voice_chat_aec") {
         std::cerr << "错误: voice_chat.json mode 非法: " << cfg.mode << "\n";
@@ -1034,8 +1136,13 @@ int CmdStart(int argc, char** argv) {
     // 5. 音频设备解析
     int input_id = cfg.audio.input_device_id;
     int output_id = cfg.audio.output_device_id;
-    auto in_devs = SpacemitAudio::AudioCapture::ListDevices();
-    auto out_devs = SpacemitAudio::AudioPlayer::ListDevices();
+    std::vector<std::pair<int, std::string>> in_devs;
+    std::vector<std::pair<int, std::string>> out_devs;
+    {
+        ScopedStderrSilencer silencer;
+        in_devs = SpacemitAudio::AudioCapture::ListDevices();
+        out_devs = SpacemitAudio::AudioPlayer::ListDevices();
+    }
 
     if (!ResolveDevice("输入", cfg.audio.input_device_id,
             cfg.audio.input_device_hints, in_devs, input_id)) {
@@ -1051,20 +1158,54 @@ int CmdStart(int argc, char** argv) {
         << (output_id >= 0 ? std::to_string(output_id) : std::string("系统默认"))
         << "\n";
 
+    int max_input_channels = 0;
+    if (GetDeviceMaxChannels(true, input_id, max_input_channels) &&
+            max_input_channels > 0 &&
+            cfg.audio.capture_channels > max_input_channels) {
+        std::cerr << "[warn] 配置 capture_channels=" << cfg.audio.capture_channels
+            << "，但输入设备最多只有 " << max_input_channels
+            << " 路，已降级\n";
+        cfg.audio.capture_channels = max_input_channels;
+    }
+    if (cfg.audio.speech_channel > cfg.audio.capture_channels) {
+        std::cerr << "[warn] speech_channel=" << cfg.audio.speech_channel
+            << " 超出录音声道数 " << cfg.audio.capture_channels
+            << "，已改为 ch1\n";
+        cfg.audio.speech_channel = 1;
+    }
+    if (cfg.doa.enabled && cfg.audio.capture_channels < 3) {
+        std::cerr << "[warn] DOA 需要至少 3 路录音；当前只有 "
+            << cfg.audio.capture_channels << " 路，已关闭 DOA\n";
+        cfg.doa.enabled = false;
+    }
+    int max_output_channels = 0;
+    if (GetDeviceMaxChannels(false, output_id, max_output_channels) &&
+            max_output_channels > 0 &&
+            cfg.audio.playback_channels > max_output_channels) {
+        std::cerr << "[warn] 配置 playback_channels=" << cfg.audio.playback_channels
+            << "，但输出设备最多只有 " << max_output_channels
+            << " 路，已降级\n";
+        cfg.audio.playback_channels = max_output_channels;
+    }
+    if (cfg.audio.playback_channels < 1) {
+        std::cerr << "错误: playback_channels 必须至少为 1，当前为 "
+            << cfg.audio.playback_channels << "\n";
+        return 1;
+    }
+
     const int capture_rate = cfg.audio.capture_rate > 0 ? cfg.audio.capture_rate : 16000;
     const int playback_rate = cfg.audio.playback_rate > 0 ? cfg.audio.playback_rate : 48000;
     int aec_sample_rate = 48000;
-    const bool aec_sample_rate_set = cfg.audio.capture_rate > 0;
-    if (aec_sample_rate_set) {
-        if (cfg.audio.capture_rate == 48000) {
-            aec_sample_rate = cfg.audio.capture_rate;
-        } else {
-            std::cerr << "[warn] AEC mode requires 48000 Hz capture; ignoring "
-                << "voice_chat.json audio.capture_rate=" << cfg.audio.capture_rate
-                << "\n";
-        }
-    }
     if (cfg.mode == "voice_chat_aec") {
+        if (cfg.audio.capture_rate > 0) {
+            if (cfg.audio.capture_rate == 48000) {
+                aec_sample_rate = cfg.audio.capture_rate;
+            } else {
+                std::cerr << "[warn] AEC mode requires 48000 Hz capture; ignoring "
+                    << "voice_chat.json audio.capture_rate=" << cfg.audio.capture_rate
+                    << "\n";
+            }
+        }
         std::cerr << "[info] AEC 采样率: " << aec_sample_rate << "\n";
     } else {
         std::cerr << "[info] 采样率: capture=" << capture_rate
@@ -1257,10 +1398,12 @@ int CmdStart(int argc, char** argv) {
         vc_args.push_back(cfg.startup_greeting);
     }
     if (cfg.mode == "voice_chat_aec") {
-        if (aec_sample_rate_set && aec_sample_rate == 48000) {
-            vc_args.push_back("--sample-rate");
-            vc_args.push_back(std::to_string(aec_sample_rate));
-        }
+        vc_args.push_back("--sample-rate");
+        vc_args.push_back(std::to_string(aec_sample_rate));
+        vc_args.push_back("--capture-channels");
+        vc_args.push_back(std::to_string(cfg.audio.capture_channels));
+        vc_args.push_back("--playback-channels");
+        vc_args.push_back(std::to_string(cfg.audio.playback_channels));
         if (cfg.aec.no_aec) {
             vc_args.push_back("--no-aec");
         }
@@ -1285,6 +1428,36 @@ int CmdStart(int argc, char** argv) {
         vc_args.push_back(std::to_string(cfg.audio.capture_channels));
         vc_args.push_back("--playback-channels");
         vc_args.push_back(std::to_string(cfg.audio.playback_channels));
+    }
+    vc_args.push_back("--speech-channel");
+    vc_args.push_back(std::to_string(cfg.audio.speech_channel));
+    if (cfg.doa.enabled) {
+        vc_args.push_back("--doa");
+        if (!cfg.doa.pick.empty()) {
+            vc_args.push_back("--doa-pick");
+            vc_args.push_back(JoinInts(cfg.doa.pick, ','));
+        }
+        if (!cfg.doa.positions.empty()) {
+            vc_args.push_back("--doa-positions");
+            vc_args.push_back(cfg.doa.positions);
+        } else {
+            vc_args.push_back("--doa-side");
+            vc_args.push_back(std::to_string(cfg.doa.side_m));
+        }
+        vc_args.push_back("--doa-azimuth-offset");
+        vc_args.push_back(std::to_string(cfg.doa.azimuth_offset_deg));
+        vc_args.push_back("--doa-max-avg-seconds");
+        vc_args.push_back(std::to_string(cfg.doa.max_avg_seconds));
+        vc_args.push_back("--doa-confidence-threshold");
+        vc_args.push_back(std::to_string(cfg.doa.confidence_threshold));
+        vc_args.push_back("--doa-margin-threshold");
+        vc_args.push_back(std::to_string(cfg.doa.margin_threshold));
+        vc_args.push_back("--doa-quality-threshold");
+        vc_args.push_back(std::to_string(cfg.doa.quality_threshold));
+        vc_args.push_back("--doa-closure-threshold-samples");
+        vc_args.push_back(std::to_string(cfg.doa.closure_threshold_samples));
+        vc_args.push_back("--doa-closure-threshold-fraction");
+        vc_args.push_back(std::to_string(cfg.doa.closure_threshold_fraction));
     }
     if (input_id >= 0) {
         vc_args.push_back("-i");
@@ -1485,7 +1658,8 @@ int CmdStop() {
 int CmdRestart(int argc, char** argv) {
     bool aec_override = false;
     bool mcp_override = false;
-    if (!ParseStartOptions(argc, argv, aec_override, mcp_override)) {
+    int doa_override = -1;
+    if (!ParseStartOptions(argc, argv, aec_override, mcp_override, doa_override)) {
         return 2;
     }
 
@@ -1588,11 +1762,13 @@ void PrintUsage(const char* prog) {
         << "用法: " << prog << " <command> [options]\n"
         << "      " << prog << " --register-speaker NAME [--force]\n"
         << "\n命令:\n"
-        << "  start [--aec] [--mcp]\n"
+        << "  start [--aec] [--mcp] [--doa|--no-doa]\n"
         << "                  启动 omni_agent daemon\n"
         << "                  --aec  临时切换 voice_chat_aec\n"
         << "                  --mcp  临时启用 MCP client\n"
-        << "  restart [--aec] [--mcp]\n"
+        << "                  --doa  临时启用 3 麦 DOA\n"
+        << "                  --no-doa 临时关闭 DOA\n"
+        << "  restart [--aec] [--mcp] [--doa|--no-doa]\n"
         << "                  重启 daemon，参数同 start\n"
         << "  stop            停止 daemon 及其所有子进程\n"
         << "  status          查看运行状态\n"
@@ -1607,6 +1783,7 @@ void PrintUsage(const char* prog) {
         << "\n示例:\n"
         << "  " << prog << " start                    # 一键启动\n"
         << "  " << prog << " start --aec              # AEC 模式启动\n"
+        << "  " << prog << " start --doa              # 4路采集: ch1语音, ch2-4定位\n"
         << "  " << prog << " start --mcp              # 临时启用 MCP\n"
         << "  " << prog << " restart --mcp            # 重启并启用 MCP\n"
         << "  " << prog << " --register-speaker alice # 注册声纹\n"

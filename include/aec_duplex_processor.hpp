@@ -55,11 +55,16 @@ class AecDuplexProcessor {
 public:
     // Callback for processed (echo-cancelled) audio
     using AudioCallback = std::function<void(const float* data, size_t frames, int sample_rate)>;
+    using RawAudioCallback = std::function<void(const float* interleaved, size_t frames,
+                                                int channels, int sample_rate)>;
 
     struct Config {
         // Audio settings
         int sample_rate = 48000;           // 48kHz recommended for AEC
-        int channels = 1;
+        int channels = 1;                  // Legacy: sets both capture/playback channels
+        int capture_channels = 0;          // 0 = use channels
+        int playback_channels = 0;         // 0 = use channels
+        int speech_channel = 1;            // 1-based capture channel for AEC/VAD/ASR
         int frames_per_buffer = 480;       // 10ms @ 48kHz
         int input_device = -1;             // -1 for default
         int output_device = -1;            // -1 for default
@@ -114,6 +119,7 @@ public:
      * Called from processing thread (not audio thread) with echo-cancelled samples
      */
     void setAudioCallback(AudioCallback callback) { audio_callback_ = std::move(callback); }
+    void setRawAudioCallback(RawAudioCallback callback) { raw_audio_callback_ = std::move(callback); }
 
     // -------------------------------------------------------------------------
     // Playback Queue
@@ -166,7 +172,8 @@ public:
 
 private:
     // Full-duplex callback (runs in real-time audio thread)
-    void onDuplexAudio(const float* input, float* output, size_t frames, int channels);
+    void onDuplexAudio(const float* input, float* output, size_t frames,
+        int input_channels, int output_channels);
 
     // Processing thread main loop (runs in non-real-time thread)
     void processingLoop();
@@ -175,6 +182,8 @@ private:
     struct AudioFrame {
         std::vector<float> input;
         std::vector<float> reference;
+        std::vector<float> raw_input;
+        int raw_channels = 0;
     };
 
     // Playback buffer
@@ -184,7 +193,7 @@ private:
     };
 
     // Fill output buffer from playback queue
-    size_t fillOutputBuffer(float* output, size_t frames);
+    size_t fillOutputBuffer(float* output, size_t frames, int output_channels);
 
     // Process input through AEC
     void processInput(const float* input, const float* output_ref, size_t frames);
@@ -218,6 +227,7 @@ private:
 
     // Callbacks
     AudioCallback audio_callback_;
+    RawAudioCallback raw_audio_callback_;
 
     // Temporary buffers (pre-allocated to avoid allocation in callback)
     std::vector<int16_t> input_int16_;

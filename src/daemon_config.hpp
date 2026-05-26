@@ -21,12 +21,14 @@ struct AudioCfg {
     // -1 表示走 hints 匹配；非负值直接作为 PortAudio 设备 index。
     int input_device_id = -1;
     int output_device_id = -1;
-    // -1 表示使用 voice_chat_daemon/底层工具默认采样率。
-    int capture_rate = -1;
-    int playback_rate = -1;
+    // 当前 omni-agent USB 音频设备固定为 16kHz。
+    int capture_rate = 16000;
+    int playback_rate = 16000;
     // 录音/播放声道数。
-    int capture_channels = 1;
-    int playback_channels = 1;
+    int capture_channels = 4;
+    int playback_channels = 2;
+    // 1-based；多声道采集时送入 AEC/VAD/ASR 的主路。
+    int speech_channel = 1;
 };
 
 struct VadCfg {
@@ -127,6 +129,20 @@ struct AecCfg {
     int buffer_frames = 0;
 };
 
+struct DoaCfg {
+    bool enabled = false;
+    std::vector<int> pick = {2, 3, 4};
+    float side_m = 0.063f;
+    std::string positions;
+    float azimuth_offset_deg = 0.0f;
+    float max_avg_seconds = 3.0f;
+    float confidence_threshold = 0.1f;
+    float margin_threshold = 0.6f;
+    float quality_threshold = 0.0f;
+    float closure_threshold_samples = 0.0f;
+    float closure_threshold_fraction = 0.3f;
+};
+
 struct LoadStatus {
     bool loaded = false;
     std::string path;
@@ -147,6 +163,7 @@ struct DaemonConfig {
     VoiceprintCfg voiceprint;
     McpCfg mcp;
     AecCfg aec;
+    DoaCfg doa;
     // daemon 日志目录。
     std::string log_dir = "~/.cache/omni_agent/logs";
     // daemon PID 文件路径。

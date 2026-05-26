@@ -90,6 +90,7 @@ endif()
 option(USE_MCP "Enable MCP (Model Context Protocol) support" ON)
 option(USE_AEC "Enable WebRTC AEC (Acoustic Echo Cancellation) for barge-in support" OFF)
 option(USE_VP "Enable Voiceprint (speaker identification) support" ON)
+option(USE_DOA "Enable DOA (Direction of Arrival) support" ON)
 
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -105,14 +106,14 @@ find_library(SPACEMIT_AUDIO_LIB NAMES spacemit_audio REQUIRED)
 find_library(AUDIO_RESAMPLER_LIB NAMES audio_resampler REQUIRED)
 find_path(AUDIO_INCLUDE_DIR NAMES audio_duplex.hpp REQUIRED)
 
-# stt
-find_library(STT_LIB NAMES stt REQUIRED)
+# asr
+find_library(ASR_LIB NAMES asr stt REQUIRED)
 find_library(SENSEVOICE_LIB NAMES sensevoice REQUIRED)
 find_library(ZIPFORMER_LIB NAMES zipformer REQUIRED)
 find_library(KALDI_FBANK_LIB NAMES kaldi-native-fbank-core REQUIRED)
 find_library(KISSFFT_FLOAT_LIB NAMES kissfft-float kissfft_float kissfft REQUIRED)
 find_library(SPACEMIT_EP_LIB NAMES spacemit_ep)  # optional, K3 only
-find_path(STT_INCLUDE_DIR NAMES asr_service.h REQUIRED)
+find_path(ASR_INCLUDE_DIR NAMES asr_service.h REQUIRED)
 
 # tts (headers installed to include/tts/)
 find_library(TTS_LIB NAMES tts REQUIRED)
@@ -132,6 +133,13 @@ endif()
 find_library(VAD_LIB NAMES vad REQUIRED)
 find_library(SILERO_VAD_LIB NAMES silero_vad REQUIRED)
 find_path(VAD_INCLUDE_DIR NAMES vad_service.h REQUIRED)
+
+# doa
+if(USE_DOA)
+    find_library(DOA_LIB NAMES sound_locator REQUIRED)
+    find_path(DOA_INCLUDE_DIR NAMES doa_service.h REQUIRED)
+    message(STATUS "DOA support enabled")
+endif()
 
 # llm
 find_library(LLM_LIB NAMES llm_service_cpp REQUIRED)
@@ -185,12 +193,17 @@ set(VOICE_AGENT_COMMON_SOURCES
     src/llm_health.cpp
 )
 
+if(USE_DOA)
+    list(APPEND VOICE_AGENT_COMMON_SOURCES src/doa_runtime.cpp)
+endif()
+
 set(VOICE_AGENT_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${AUDIO_INCLUDE_DIR}
-    ${STT_INCLUDE_DIR}
+    ${ASR_INCLUDE_DIR}
     ${TTS_INCLUDE_DIR}
     ${VAD_INCLUDE_DIR}
+    ${DOA_INCLUDE_DIR}
     ${LLM_INCLUDE_DIR}
     ${ONNXRUNTIME_INCLUDE_DIR}
 )
@@ -199,7 +212,7 @@ set(VOICE_AGENT_LIBS
     ${SPACEMIT_AUDIO_LIB}
     ${AUDIO_RESAMPLER_LIB}
     ${SAMPLERATE_LIBRARIES}
-    ${STT_LIB}
+    ${ASR_LIB}
     ${SENSEVOICE_LIB}
     ${ZIPFORMER_LIB}
     ${KALDI_FBANK_LIB}
@@ -210,6 +223,7 @@ set(VOICE_AGENT_LIBS
     ${KALDIFST_FST_LIB}
     ${VAD_LIB}
     ${SILERO_VAD_LIB}
+    ${DOA_LIB}
     ${LLM_LIB}
     ${ONNXRUNTIME_LIB}
     ${CURL_LIBRARIES}
@@ -294,6 +308,11 @@ if(USE_AEC)
         message(STATUS "  + Voiceprint support enabled for voice_chat_aec")
     endif()
 
+    if(USE_DOA)
+        target_compile_definitions(voice_chat_aec PRIVATE USE_DOA)
+        message(STATUS "  + DOA support enabled for voice_chat_aec")
+    endif()
+
     # Install WebRTC shared library to lib/
     get_filename_component(_WEBRTC_LIB_DIR "${WEBRTC_LIB}" DIRECTORY)
     install(FILES "${_WEBRTC_LIB_DIR}/libwebrtc-audio-processing-2.so.1" DESTINATION lib)
@@ -358,6 +377,11 @@ if(USE_VP)
         target_link_libraries(voice_chat -Wl,--whole-archive ${VOICEPRINT_LIB} -Wl,--no-whole-archive)
     endif()
     message(STATUS "  + Voiceprint support enabled for voice_chat")
+endif()
+
+if(USE_DOA)
+    target_compile_definitions(voice_chat PRIVATE USE_DOA)
+    message(STATUS "  + DOA support enabled for voice_chat")
 endif()
 
 install(TARGETS voice_chat RUNTIME DESTINATION bin)
