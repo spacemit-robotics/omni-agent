@@ -137,14 +137,16 @@ find_path(VAD_INCLUDE_DIR NAMES vad_service.h REQUIRED)
 find_library(LLM_LIB NAMES llm_service_cpp REQUIRED)
 find_path(LLM_INCLUDE_DIR NAMES llm_service.h REQUIRED)
 
+# nlohmann_json (used by daemon_config, llm_health, mcp_helper, voice_pipeline)
+find_package(nlohmann_json QUIET)
+if(NOT nlohmann_json_FOUND)
+    find_path(NLOHMANN_JSON_INCLUDE_DIR NAMES nlohmann/json.hpp)
+endif()
+
 # mcp
 if(USE_MCP)
     find_library(MCP_LIB NAMES mcp REQUIRED)
     find_path(MCP_INCLUDE_DIR NAMES mcp_service.hpp REQUIRED)
-    find_package(nlohmann_json QUIET)
-    if(NOT nlohmann_json_FOUND)
-        find_path(NLOHMANN_JSON_INCLUDE_DIR NAMES nlohmann/json.hpp)
-    endif()
     message(STATUS "MCP support enabled")
 endif()
 
@@ -180,6 +182,7 @@ set(VOICE_AGENT_COMMON_SOURCES
     src/engine_init.cpp
     src/voice_pipeline.cpp
     src/text_buffer.cpp
+    src/llm_health.cpp
 )
 
 set(VOICE_AGENT_INCLUDE_DIRS
@@ -249,6 +252,12 @@ if(USE_AEC)
 
     target_link_directories(voice_chat_aec PRIVATE ${VOICE_AGENT_LINK_DIRS})
 
+    if(nlohmann_json_FOUND)
+        target_link_libraries(voice_chat_aec nlohmann_json::nlohmann_json)
+    elseif(NLOHMANN_JSON_INCLUDE_DIR)
+        target_include_directories(voice_chat_aec PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
+    endif()
+
     set_target_properties(voice_chat_aec PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     )
@@ -270,11 +279,6 @@ if(USE_AEC)
     if(USE_MCP)
         target_compile_definitions(voice_chat_aec PRIVATE USE_MCP)
         target_include_directories(voice_chat_aec PRIVATE ${MCP_INCLUDE_DIR})
-        if(nlohmann_json_FOUND)
-            target_link_libraries(voice_chat_aec nlohmann_json::nlohmann_json)
-        elseif(NLOHMANN_JSON_INCLUDE_DIR)
-            target_include_directories(voice_chat_aec PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
-        endif()
         target_link_libraries(voice_chat_aec ${MCP_LIB})
         message(STATUS "  + MCP support enabled for voice_chat_aec")
     endif()
@@ -314,6 +318,12 @@ target_link_libraries(voice_chat ${VOICE_AGENT_LIBS})
 
 target_link_directories(voice_chat PRIVATE ${VOICE_AGENT_LINK_DIRS})
 
+if(nlohmann_json_FOUND)
+    target_link_libraries(voice_chat nlohmann_json::nlohmann_json)
+elseif(NLOHMANN_JSON_INCLUDE_DIR)
+    target_include_directories(voice_chat PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
+endif()
+
 set_target_properties(voice_chat PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
@@ -335,11 +345,6 @@ message(STATUS "Building voice_chat (no AEC, independent capture/playback)")
 if(USE_MCP)
     target_compile_definitions(voice_chat PRIVATE USE_MCP)
     target_include_directories(voice_chat PRIVATE ${MCP_INCLUDE_DIR})
-    if(nlohmann_json_FOUND)
-        target_link_libraries(voice_chat nlohmann_json::nlohmann_json)
-    elseif(NLOHMANN_JSON_INCLUDE_DIR)
-        target_include_directories(voice_chat PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
-    endif()
     target_link_libraries(voice_chat ${MCP_LIB})
     message(STATUS "  + MCP support enabled for voice_chat")
 endif()
