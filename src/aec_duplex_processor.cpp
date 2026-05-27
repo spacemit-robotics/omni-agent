@@ -31,6 +31,14 @@ constexpr int kFrameSizeMs = 10;
 constexpr int kDefaultSampleRate = 48000;
 constexpr int kFrameSize = kDefaultSampleRate * kFrameSizeMs / 1000;  // 480 samples
 
+namespace {
+
+int DefaultFramesPerBuffer(int sample_rate) {
+    return std::max(1, sample_rate * kFrameSizeMs / 1000);
+}
+
+}  // namespace
+
 // ============================================================================
 // Constructor / Destructor
 // ============================================================================
@@ -45,8 +53,20 @@ AecDuplexProcessor::AecDuplexProcessor(const Config& config)
     , is_running_(false)
     , is_playing_(false)
     , audio_callback_(nullptr)
+    , raw_audio_callback_(nullptr)
     , history_write_pos_(0)
     , delay_samples_(0) {
+    if (config_.capture_channels <= 0) {
+        config_.capture_channels = config_.channels;
+    }
+    if (config_.playback_channels <= 0) {
+        config_.playback_channels = config_.channels;
+    }
+    if (config_.frames_per_buffer <= 0) {
+        config_.frames_per_buffer = DefaultFramesPerBuffer(config_.sample_rate);
+    }
+    config_.speech_channel = std::max(1, config_.speech_channel);
+
     // Pre-allocate buffers
     input_int16_.resize(config_.frames_per_buffer);
     output_int16_.resize(config_.frames_per_buffer);
@@ -77,10 +97,24 @@ bool AecDuplexProcessor::initialize() {
     std::cout << "[AecDuplex] Sample rate: " << config_.sample_rate << " Hz" << std::endl;
     std::cout << "[AecDuplex] Frame size: " << config_.frames_per_buffer << " samples" << std::endl;
 
-    // Ensure sample rate is 48kHz for optimal AEC performance
-    if (config_.sample_rate != 48000) {
-        std::cerr << "[AecDuplex] Warning: Sample rate should be 48000 Hz for best AEC performance" << std::endl;
-        config_.sample_rate = 48000;
+    if (config_.sample_rate != 16000 && config_.sample_rate != 32000 &&
+            config_.sample_rate != 48000) {
+        std::cerr << "[AecDuplex] Warning: WebRTC APM is best tested at "
+            << "16000/32000/48000 Hz; requested " << config_.sample_rate
+            << " Hz" << std::endl;
+    }
+    if (config_.capture_channels <= 0 || config_.playback_channels <= 0) {
+        std::cerr << "[AecDuplex] Invalid channel config: capture="
+            << config_.capture_channels << ", playback="
+            << config_.playback_channels << std::endl;
+        return false;
+    }
+    if (config_.speech_channel < 1 ||
+            config_.speech_channel > config_.capture_channels) {
+        std::cerr << "[AecDuplex] speech_channel " << config_.speech_channel
+            << " out of range [1, " << config_.capture_channels << "]"
+            << std::endl;
+        return false;
     }
 
     // Create WebRTC APM
@@ -123,6 +157,9 @@ bool AecDuplexProcessor::initialize() {
     apm_->ApplyConfig(apm_config);
 
     std::cout << "[AecDuplex] WebRTC APM configured:" << std::endl;
+    std::cout << "[AecDuplex]   Capture Channels: " << config_.capture_channels << std::endl;
+    std::cout << "[AecDuplex]   Playback Channels: " << config_.playback_channels << std::endl;
+    std::cout << "[AecDuplex]   Speech Channel: ch" << config_.speech_channel << std::endl;
     std::cout << "[AecDuplex]   Echo Cancellation: " << (config_.aec_enabled ? "ON" : "OFF") << std::endl;
     std::cout << "[AecDuplex]   Noise Suppression: " << (config_.ns_enabled ? "ON" : "OFF") << std::endl;
     std::cout << "[AecDuplex]   Gain Control: " << (config_.agc_enabled ? "ON" : "OFF") << std::endl;
@@ -136,8 +173,9 @@ bool AecDuplexProcessor::initialize() {
         config_.output_device);
 
     // Set callback
-    duplex_->SetCallback([this](const float* input, float* output, size_t frames, int channels) {
-        onDuplexAudio(input, output, frames, channels);
+    duplex_->SetCallbackEx([this](const float* input, float* output, size_t frames,
+            int input_channels, int output_channels) {
+        onDuplexAudio(input, output, frames, input_channels, output_channels);
     });
 
     std::cout << "[AecDuplex] Initialization complete" << std::endl;
@@ -171,7 +209,8 @@ bool AecDuplexProcessor::start() {
     processing_running_ = true;
     processing_thread_ = std::thread(&AecDuplexProcessor::processingLoop, this);
 
-    if (!duplex_->Start(config_.sample_rate, config_.channels, config_.frames_per_buffer)) {
+    if (!duplex_->Start(config_.sample_rate, config_.capture_channels,
+                        config_.playback_channels, config_.frames_per_buffer)) {
         std::cerr << "[AecDuplex] Failed to start duplex stream" << std::endl;
         // Stop processing thread on failure
         processing_running_ = false;
@@ -219,13 +258,16 @@ void AecDuplexProcessor::stop() {
 // ============================================================================
 
 void AecDuplexProcessor::onDuplexAudio(const float* input, float* output,
-                                        size_t frames, int channels) {
+    size_t frames, int input_channels, int output_channels) {
     // Step 1: Fill output buffer from playback queue (must be fast!)
-    fillOutputBuffer(output, frames);
+    fillOutputBuffer(output, frames, output_channels);
 
     // Step 2: Save output to playback history ring buffer
     for (size_t i = 0; i < frames; ++i) {
-        playback_history_[history_write_pos_] = output[i];
+        const float ref = (output && output_channels > 0)
+            ? output[i * static_cast<size_t>(output_channels)]
+            : 0.0f;
+        playback_history_[history_write_pos_] = ref;
         history_write_pos_ = (history_write_pos_ + 1) % playback_history_.size();
     }
 
@@ -236,7 +278,16 @@ void AecDuplexProcessor::onDuplexAudio(const float* input, float* output,
     // Step 4: Enqueue input + reference for async processing (no AEC here!)
     if (input && processing_running_) {
         AudioFrame frame;
-        frame.input.assign(input, input + frames);
+        frame.input.resize(frames);
+        const int speech_idx = std::clamp(config_.speech_channel - 1, 0,
+            std::max(0, input_channels - 1));
+        for (size_t i = 0; i < frames; ++i) {
+            frame.input[i] = input[i * static_cast<size_t>(input_channels) + speech_idx];
+        }
+        if (raw_audio_callback_) {
+            frame.raw_channels = input_channels;
+            frame.raw_input.assign(input, input + frames * static_cast<size_t>(input_channels));
+        }
         frame.reference.resize(frames);
         for (size_t i = 0; i < frames; ++i) {
             frame.reference[i] = playback_history_[(read_pos + i) % history_size];
@@ -277,6 +328,14 @@ void AecDuplexProcessor::processingLoop() {
             audio_queue_.pop();
         }
 
+        if (raw_audio_callback_ && !frame.raw_input.empty()) {
+            raw_audio_callback_(frame.raw_input.data(),
+                                frame.raw_input.size() /
+                                    static_cast<size_t>(frame.raw_channels),
+                                frame.raw_channels,
+                                config_.sample_rate);
+        }
+
         // Process through AEC (now in non-real-time thread, can take longer)
         if (apm_) {
             processInput(frame.input.data(), frame.reference.data(), frame.input.size());
@@ -291,7 +350,9 @@ void AecDuplexProcessor::processingLoop() {
     std::cout << "[AecDuplex] Processing thread stopped" << std::endl;
 }
 
-size_t AecDuplexProcessor::fillOutputBuffer(float* output, size_t frames) {
+size_t AecDuplexProcessor::fillOutputBuffer(float* output, size_t frames,
+                                            int output_channels) {
+    if (!output || output_channels <= 0) return 0;
     std::lock_guard<std::mutex> lock(playback_mutex_);
 
     // 检查是否处于淡出状态
@@ -309,7 +370,11 @@ size_t AecDuplexProcessor::fillOutputBuffer(float* output, size_t frames) {
             // 复制并应用淡出增益
             float gain = static_cast<float>(fade_frames) / kFadeOutFrames;
             for (size_t i = 0; i < samples_to_copy; ++i) {
-                output[i] = current_playback_.samples[current_playback_.position + i] * gain;
+                const float sample =
+                    current_playback_.samples[current_playback_.position + i] * gain;
+                for (int ch = 0; ch < output_channels; ++ch) {
+                    output[i * static_cast<size_t>(output_channels) + ch] = sample;
+                }
             }
             samples_written = samples_to_copy;
             current_playback_.position += samples_to_copy;
@@ -317,7 +382,9 @@ size_t AecDuplexProcessor::fillOutputBuffer(float* output, size_t frames) {
 
         // 填充剩余为静音
         if (samples_written < frames) {
-            std::memset(output + samples_written, 0, (frames - samples_written) * sizeof(float));
+            std::memset(output + samples_written * static_cast<size_t>(output_channels),
+                        0, (frames - samples_written) *
+                            static_cast<size_t>(output_channels) * sizeof(float));
         }
 
         // 递减淡出计数
@@ -354,7 +421,8 @@ size_t AecDuplexProcessor::fillOutputBuffer(float* output, size_t frames) {
     if (current_playback_.samples.empty() ||
         current_playback_.position >= current_playback_.samples.size()) {
         // No playback, output silence
-        std::memset(output, 0, frames * sizeof(float));
+        std::memset(output, 0,
+                    frames * static_cast<size_t>(output_channels) * sizeof(float));
         is_playing_.store(false);
         return 0;
     }
@@ -363,13 +431,18 @@ size_t AecDuplexProcessor::fillOutputBuffer(float* output, size_t frames) {
     size_t samples_available = current_playback_.samples.size() - current_playback_.position;
     size_t samples_to_copy = std::min(frames, samples_available);
 
-    std::memcpy(output,
-                current_playback_.samples.data() + current_playback_.position,
-                samples_to_copy * sizeof(float));
+    for (size_t i = 0; i < samples_to_copy; ++i) {
+        const float sample = current_playback_.samples[current_playback_.position + i];
+        for (int ch = 0; ch < output_channels; ++ch) {
+            output[i * static_cast<size_t>(output_channels) + ch] = sample;
+        }
+    }
 
     // Pad with zeros if needed
     if (samples_to_copy < frames) {
-        std::memset(output + samples_to_copy, 0, (frames - samples_to_copy) * sizeof(float));
+        std::memset(output + samples_to_copy * static_cast<size_t>(output_channels),
+                    0, (frames - samples_to_copy) *
+                        static_cast<size_t>(output_channels) * sizeof(float));
     }
 
     current_playback_.position += samples_to_copy;

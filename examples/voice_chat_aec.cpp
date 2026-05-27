@@ -19,12 +19,14 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <chrono>
 #include <csignal>
 #include <cstring>
 #include <iomanip>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <sstream>
 #include <vector>
 #include <cmath>
 
@@ -38,6 +40,9 @@
 #include "voice_common.hpp"
 #include "engine_init.hpp"
 #include "voice_pipeline.hpp"
+#ifdef USE_DOA
+#include "doa_runtime.hpp"
+#endif
 
 // ============================================================================
 // 参数配置
@@ -65,6 +70,10 @@ struct Config {
     int aec_delay_ms = 50;
     int buffer_frames = 0;
     int sample_rate = 48000;
+    int capture_channels = 1;
+    int playback_channels = 1;
+    int speech_channel = 1;
+    bool capture_channels_set = false;
 
     // 调试：音频录制
     bool save_audio = false;
@@ -74,6 +83,10 @@ struct Config {
 
     // MCP 配置
     std::string mcp_config_path = "";
+
+#ifdef USE_DOA
+    omni_agent::DoaRuntimeConfig doa;
+#endif
 
 #ifdef USE_VP
     // Voiceprint 配置
@@ -119,6 +132,48 @@ Config parseArgs(int argc, char* argv[]) {
             cfg.buffer_frames = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--sample-rate") == 0 && i + 1 < argc) {
             cfg.sample_rate = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--capture-channels") == 0 && i + 1 < argc) {
+            cfg.capture_channels = std::stoi(argv[++i]);
+            cfg.capture_channels_set = true;
+        } else if (strcmp(argv[i], "--playback-channels") == 0 && i + 1 < argc) {
+            cfg.playback_channels = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--speech-channel") == 0 && i + 1 < argc) {
+            cfg.speech_channel = std::stoi(argv[++i]);
+#ifdef USE_DOA
+        } else if (strcmp(argv[i], "--doa") == 0) {
+            cfg.doa.enabled = true;
+        } else if (strcmp(argv[i], "--no-doa") == 0) {
+            cfg.doa.enabled = false;
+        } else if (strcmp(argv[i], "--doa-pick") == 0 && i + 1 < argc) {
+            std::string error;
+            if (!omni_agent::ParseIntList(argv[++i], &cfg.doa.pick, &error)) {
+                std::cerr << "错误: --doa-pick: " << error << "\n";
+                exit(1);
+            }
+        } else if (strcmp(argv[i], "--doa-side") == 0 && i + 1 < argc) {
+            cfg.doa.side_m = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--doa-positions") == 0 && i + 1 < argc) {
+            cfg.doa.positions_spec = argv[++i];
+        } else if (strcmp(argv[i], "--doa-azimuth-offset") == 0 && i + 1 < argc) {
+            cfg.doa.azimuth_offset_deg = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--doa-max-avg-seconds") == 0 && i + 1 < argc) {
+            cfg.doa.max_avg_seconds = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--doa-confidence-threshold") == 0 && i + 1 < argc) {
+            cfg.doa.confidence_threshold = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--doa-margin-threshold") == 0 && i + 1 < argc) {
+            cfg.doa.margin_threshold = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--doa-quality-threshold") == 0 && i + 1 < argc) {
+            cfg.doa.quality_threshold = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--doa-closure-threshold-samples") == 0 && i + 1 < argc) {
+            cfg.doa.closure_threshold_samples = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--doa-closure-threshold-fraction") == 0 && i + 1 < argc) {
+            cfg.doa.closure_threshold_fraction = std::stof(argv[++i]);
+#else
+        } else if (strcmp(argv[i], "--doa") == 0 || strcmp(argv[i], "--no-doa") == 0 ||
+                strncmp(argv[i], "--doa-", 6) == 0) {
+            std::cerr << "错误: 当前构建未启用 DOA (USE_DOA=OFF)\n";
+            exit(1);
+#endif
         } else if (strcmp(argv[i], "--save-audio") == 0) {
             cfg.save_audio = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
@@ -191,6 +246,18 @@ Config parseArgs(int argc, char* argv[]) {
                 << "  --aec-delay <ms>          AEC延迟补偿 (默认: 50ms, 范围: 20-100ms)\n"
                 << "  --buffer-frames <n>       音频缓冲帧数 (默认: 480)\n"
                 << "  --sample-rate <hz>        音频采样率 (默认: 48000, 常用: 44100, 48000)\n"
+                << "  --capture-channels <n>    录音声道数 (默认: 1)\n"
+                << "  --playback-channels <n>   播放声道数 (默认: 1)\n"
+                << "  --speech-channel <n>      送入AEC/VAD/ASR的录音声道 (默认: 1)\n"
+#ifdef USE_DOA
+                << "\nDOA:\n"
+                << "  --doa                     开启三麦0-360度定位\n"
+                << "  --no-doa                  关闭定位\n"
+                << "  --doa-pick <a,b,c>        1-based定位声道映射 (4ch默认: 2,3,4)\n"
+                << "  --doa-side <m>            等边三角形边长 (默认: 0.063)\n"
+                << "  --doa-positions <spec>    麦克风坐标: x,y[,z];x,y[,z];x,y[,z]\n"
+                << "  --doa-azimuth-offset <d>  阵列到机器人坐标角度偏移\n"
+#endif
                 << "\n调试:\n"
                 << "  --save-audio [file]       保存AEC处理后的音频 (默认: aec_debug.wav)\n"
                 << "  --save-tts-audio [file]   保存TTS输出 (默认: tts_debug.wav)\n"
@@ -210,8 +277,116 @@ Config parseArgs(int argc, char* argv[]) {
             exit(0);
         }
     }
+#ifdef USE_DOA
+    if (cfg.doa.enabled && !cfg.capture_channels_set) {
+        cfg.capture_channels = 4;
+    }
+    cfg.doa.sample_rate = cfg.sample_rate;
+    cfg.doa.capture_channels = cfg.capture_channels;
+    cfg.doa.speech_channel = cfg.speech_channel;
+#endif
     return cfg;
 }
+
+#ifdef USE_VP
+std::string formatVpScore(float score) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3) << score;
+    return oss.str();
+}
+#endif
+
+std::string formatFloat(float value, int precision) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(precision) << value;
+    return oss.str();
+}
+
+class VadProgressPrinter {
+public:
+    VadProgressPrinter() = default;
+    ~VadProgressPrinter() {
+        Stop();
+    }
+
+    VadProgressPrinter(const VadProgressPrinter&) = delete;
+    VadProgressPrinter& operator=(const VadProgressPrinter&) = delete;
+
+    void Start() {
+        running_ = true;
+        worker_ = std::thread([this]() {
+            while (running_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+                float prob = 0.0f;
+                float threshold = 0.0f;
+                size_t buffer_samples = 0;
+                bool active = false;
+                bool has_recent_sample = false;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    auto now = std::chrono::steady_clock::now();
+                    has_recent_sample = has_sample_ &&
+                        now - updated_at_ <= std::chrono::milliseconds(300);
+                    if (has_recent_sample) {
+                        prob = prob_;
+                        threshold = threshold_;
+                        buffer_samples = buffer_samples_;
+                        active = active_;
+                    }
+                }
+
+                if (!has_recent_sample) {
+                    continue;
+                }
+
+                std::cout << "\r" << getTimestamp()
+                    << " [VAD] prob=" << formatFloat(prob, 2);
+                if (active) {
+                    std::cout << " threshold=" << formatFloat(threshold, 2)
+                        << " buffer=" << formatFloat(buffer_samples / 16000.0f, 1) << "s";
+                }
+                std::cout << "                    " << std::flush;
+            }
+        });
+    }
+
+    void Stop() {
+        running_ = false;
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+    }
+
+    void Publish(float prob, float threshold, size_t buffer_samples, bool active,
+            bool force = false) {
+        auto now = std::chrono::steady_clock::now();
+        if (!force && now - last_publish_ < std::chrono::milliseconds(30)) {
+            return;
+        }
+        last_publish_ = now;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        prob_ = prob;
+        threshold_ = threshold;
+        buffer_samples_ = buffer_samples;
+        active_ = active;
+        has_sample_ = true;
+        updated_at_ = now;
+    }
+
+private:
+    std::atomic<bool> running_{false};
+    std::thread worker_;
+    std::mutex mutex_;
+    bool has_sample_ = false;
+    float prob_ = 0.0f;
+    float threshold_ = 0.0f;
+    size_t buffer_samples_ = 0;
+    bool active_ = false;
+    std::chrono::steady_clock::time_point last_publish_{};
+    std::chrono::steady_clock::time_point updated_at_{};
+};
 
 // ============================================================================
 // 列出音频设备
@@ -344,6 +519,9 @@ int main(int argc, char* argv[]) {
     std::cout << getTimestamp() << " 噪声抑制: " << (cfg.ns_enabled ? "ON" : "OFF") << "\n";
     std::cout << getTimestamp() << " AGC: " << (cfg.agc_enabled ? "ON" : "OFF") << "\n";
     std::cout << getTimestamp() << " 采样率: " << cfg.sample_rate << " Hz (AEC) -> 16000 Hz (VAD/ASR)\n";
+    std::cout << getTimestamp() << " 声道: capture=" << cfg.capture_channels
+        << "ch playback=" << cfg.playback_channels
+        << "ch speech=ch" << cfg.speech_channel << "\n";
     std::cout << getTimestamp() << " 按 Ctrl+C 退出\n";
     std::cout << getTimestamp() << " ========================================\n\n";
 
@@ -377,9 +555,12 @@ int main(int argc, char* argv[]) {
     AecDuplexProcessor::Config aec_cfg;
     aec_cfg.sample_rate = cfg.sample_rate;
     aec_cfg.channels = 1;
-    if (cfg.buffer_frames > 0) {
-        aec_cfg.frames_per_buffer = cfg.buffer_frames;
-    }
+    aec_cfg.capture_channels = cfg.capture_channels;
+    aec_cfg.playback_channels = cfg.playback_channels;
+    aec_cfg.speech_channel = cfg.speech_channel;
+    aec_cfg.frames_per_buffer = cfg.buffer_frames > 0
+        ? cfg.buffer_frames
+        : std::max(1, cfg.sample_rate / 100);
     aec_cfg.input_device = cfg.input_device;
     aec_cfg.output_device = cfg.output_device;
     aec_cfg.aec_enabled = cfg.aec_enabled;
@@ -392,6 +573,19 @@ int main(int argc, char* argv[]) {
         std::cerr << "\n" << getTimestamp() << " 错误: AEC 初始化失败\n";
         return 1;
     }
+
+#ifdef USE_DOA
+    omni_agent::DoaRuntime doa_runtime;
+    if (cfg.doa.enabled) {
+        if (!doa_runtime.Initialize(cfg.doa, std::cerr)) {
+            std::cerr << "\n" << getTimestamp() << " 错误: DOA 初始化失败\n";
+            return 1;
+        }
+        std::cout << "\n" << getTimestamp() << " DOA: ON ("
+            << doa_runtime.ChannelMapString()
+            << ", sample_rate=" << cfg.sample_rate << ")\n";
+    }
+#endif
     std::cout << " OK\n\n";
 
     // -------------------------------------------------------------------------
@@ -424,7 +618,8 @@ int main(int argc, char* argv[]) {
         auto vp_result = initVP(cfg.vp_database, cfg.vp_threads, cfg.vp_threshold);
         if (!vp_result.engine) return 1;
         vp_engine = vp_result.engine;
-        std::cout << getTimestamp() << " 声纹识别: ON (db: " << cfg.vp_database << ")\n";
+        std::cout << getTimestamp() << " 声纹识别: ON (db: " << cfg.vp_database
+            << ", threshold=" << formatVpScore(vp_engine->GetThreshold()) << ")\n";
     }
 #endif
 
@@ -437,7 +632,7 @@ int main(int argc, char* argv[]) {
     const int silence_frames_threshold =
         static_cast<int>(cfg.silence_duration * 16000 / 512);
     bool is_speaking = false;
-    int frame_count = 0;
+    float vad_segment_max_prob = 0.0f;
 
     const size_t PRE_BUFFER_FRAMES = 20;
     std::deque<std::vector<float>> pre_buffer;
@@ -457,6 +652,8 @@ int main(int argc, char* argv[]) {
 
     const size_t VAD_FRAME_SIZE = 512;
     std::vector<float> vad_frame_buffer;
+    VadProgressPrinter vad_progress;
+    vad_progress.Start();
 
     // -------------------------------------------------------------------------
     // 构造 VoicePipelineContext
@@ -504,6 +701,15 @@ int main(int argc, char* argv[]) {
     // -------------------------------------------------------------------------
     // 设置 AEC 处理器回调
     // -------------------------------------------------------------------------
+#ifdef USE_DOA
+    if (doa_runtime.enabled()) {
+        aec_processor.setRawAudioCallback(
+            [&](const float* data, size_t frames, int channels, int /*sample_rate*/) {
+                if (!g_running) return;
+                doa_runtime.ProcessInterleaved(data, frames, channels);
+            });
+    }
+#endif
     aec_processor.setAudioCallback([&](const float* data, size_t frames, int /*sample_rate*/) {
         if (!g_running) return;
 
@@ -526,20 +732,12 @@ int main(int argc, char* argv[]) {
             auto vad_result = vad->Detect(vad_frame);
             float vad_prob = vad_result ? vad_result->GetProbability() : 0.0f;
 
-            frame_count++;
-            if (frame_count % 10 == 0 && !g_processing) {
-                std::cout << "\r" << getTimestamp() << " [VAD] prob=" << std::fixed
-                    << std::setprecision(2) << vad_prob
-                    << " speaking=" << (is_speaking ? "Y" : "N")
-                    << " buffer=" << audio_buffer.size()
-                    << " playing=" << (aec_processor.isPlaying() ? "Y" : "N")
-                    << "      " << std::flush;
-            }
-
             if (g_processing) {
                 if (barge_in_recording && is_speaking) {
                     std::lock_guard<std::mutex> lock(buffer_mutex);
                     audio_buffer.insert(audio_buffer.end(), vad_frame.begin(), vad_frame.end());
+                    vad_segment_max_prob = std::max(vad_segment_max_prob, vad_prob);
+                    vad_progress.Publish(vad_prob, cfg.vad_threshold, audio_buffer.size(), true);
 
                     if (vad_prob <= cfg.vad_threshold) {
                         if (post_barge_in_cooldown > 0) {
@@ -565,6 +763,11 @@ int main(int argc, char* argv[]) {
                             << barge_in_confirm_frames << "帧, prob=" << vad_prob
                             << ")，停止播放\n";
                         aec_processor.clearPlayback();
+#ifdef USE_DOA
+                        if (doa_runtime.enabled()) {
+                            doa_runtime.Reset();
+                        }
+#endif
                         g_barge_in = true;
                         barge_in_recording = true;
                         barge_in_confirm_frames = 0;
@@ -573,12 +776,14 @@ int main(int argc, char* argv[]) {
 
                         std::lock_guard<std::mutex> lock(buffer_mutex);
                         is_speaking = true;
+                        vad_segment_max_prob = vad_prob;
                         audio_buffer.clear();
                         for (const auto& frame : pre_buffer) {
                             audio_buffer.insert(audio_buffer.end(), frame.begin(), frame.end());
                         }
                         pre_buffer.clear();
                         silence_frames_count = 0;
+                        vad_progress.Publish(vad_prob, cfg.vad_threshold, audio_buffer.size(), true, true);
                     }
                 } else {
                     barge_in_confirm_frames = 0;
@@ -594,6 +799,11 @@ int main(int argc, char* argv[]) {
 
             if (vad_prob > cfg.vad_threshold) {
                 if (!is_speaking) {
+#ifdef USE_DOA
+                    if (doa_runtime.enabled()) {
+                        doa_runtime.Reset();
+                    }
+#endif
                     is_speaking = true;
                     audio_buffer.clear();
 
@@ -602,12 +812,16 @@ int main(int argc, char* argv[]) {
                     }
                     pre_buffer.clear();
 
-                    std::cout << "\n" << getTimestamp() << " [VAD] 开始说话 (prob=" << vad_prob << ")...\n";
+                    std::cout << "\n";
                 }
                 audio_buffer.insert(audio_buffer.end(), vad_frame.begin(), vad_frame.end());
+                vad_segment_max_prob = std::max(vad_segment_max_prob, vad_prob);
+                vad_progress.Publish(vad_prob, cfg.vad_threshold, audio_buffer.size(), true, true);
                 silence_frames_count = 0;
             } else if (is_speaking) {
                 audio_buffer.insert(audio_buffer.end(), vad_frame.begin(), vad_frame.end());
+                vad_segment_max_prob = std::max(vad_segment_max_prob, vad_prob);
+                vad_progress.Publish(vad_prob, cfg.vad_threshold, audio_buffer.size(), true);
 
                 if (post_barge_in_cooldown > 0) {
                     post_barge_in_cooldown--;
@@ -618,21 +832,35 @@ int main(int argc, char* argv[]) {
                 if (silence_frames_count >= silence_frames_threshold) {
                     is_speaking = false;
                     barge_in_recording = false;
-                    std::cout << "\n" << getTimestamp() << " [VAD] 停止说话，触发识别\n";
+                    std::cout << "\r" << getTimestamp() << " [VAD] 停止说话，触发识别";
+                    std::cout << " max_prob=" << formatFloat(vad_segment_max_prob, 2)
+                        << " threshold=" << formatFloat(cfg.vad_threshold, 2);
+#ifdef USE_DOA
+                    SpacemitAudio::MultiSoundLocatorResult doa_result;
+                    if (doa_runtime.GetLatestValid(&doa_result)) {
+                        std::cout << " DOA=" << std::fixed << std::setprecision(1)
+                            << doa_result.azimuth_deg << "deg";
+                    } else if (doa_runtime.enabled()) {
+                        std::cout << " DOA=--";
+                    }
+#endif
+                    std::cout << std::endl;
 
                     if (audio_buffer.size() > 8000) {
 #ifdef USE_VP
                         std::string speaker_tag;
                         bool vp_passed = true;
                         if (vp_engine) {
+                            std::shared_ptr<SpacemiT::VpResult> vp_res;
                             if (!cfg.vp_verify.empty()) {
-                                auto vp_res = vp_engine->Verify(cfg.vp_verify, audio_buffer, 16000);
+                                vp_res = vp_engine->Verify(cfg.vp_verify, audio_buffer, 16000);
                                 if (vp_res && vp_res->IsSuccess()) {
                                     std::cout << getTimestamp() << " [VP] 验证 \""
                                         << cfg.vp_verify << "\": "
                                         << (vp_res->IsVerified() ? "通过" : "不通过")
-                                        << " (score: " << std::fixed << std::setprecision(3)
-                                        << vp_res->GetScore() << ")\n";
+                                        << " (score: " << formatVpScore(vp_res->GetScore())
+                                        << ", threshold: " << formatVpScore(vp_engine->GetThreshold())
+                                        << ")" << std::endl;
                                     if (vp_res->IsVerified()) {
                                         speaker_tag = "[" + cfg.vp_verify + "] ";
                                     } else {
@@ -642,13 +870,14 @@ int main(int argc, char* argv[]) {
                                     vp_passed = false;
                                 }
                             } else {
-                                auto vp_res = vp_engine->Identify(audio_buffer, 16000);
+                                vp_res = vp_engine->Identify(audio_buffer, 16000);
                                 if (vp_res && vp_res->IsSuccess()) {
                                     if (vp_res->IsIdentified()) {
                                         std::cout << getTimestamp() << " [VP] 说话人: "
                                             << vp_res->GetName()
-                                            << " (score: " << std::fixed << std::setprecision(3)
-                                            << vp_res->GetScore() << ")\n";
+                                            << " (score: " << formatVpScore(vp_res->GetScore())
+                                            << ", threshold: " << formatVpScore(vp_engine->GetThreshold())
+                                            << ")" << std::endl;
                                         speaker_tag = "[" + vp_res->GetName() + "] ";
                                     } else {
                                         vp_passed = false;
@@ -661,10 +890,9 @@ int main(int argc, char* argv[]) {
                                         for (int k = 0; k < show_n; k++) {
                                             std::cout << getTimestamp() << " [VP]   "
                                                 << (k + 1) << ". " << matches[k].name
-                                                << " (score: " << std::fixed << std::setprecision(3)
-                                                << matches[k].score << ")"
+                                                << " (score: " << formatVpScore(matches[k].score) << ")"
                                                 << (matches[k].score >= vp_engine->GetThreshold() ? " *" : "")
-                                                << "\n";
+                                                << std::endl;
                                         }
                                     }
                                 } else {
@@ -672,16 +900,39 @@ int main(int argc, char* argv[]) {
                                 }
                             }
                             if (!vp_passed) {
-                                std::cout << getTimestamp() << " [VP] 未识别说话人，丢弃音频\n";
+                                std::cout << getTimestamp() << " [VP] 未识别说话人，丢弃音频";
+                                if (!cfg.vp_verify.empty()) {
+                                    if (vp_res && vp_res->IsSuccess()) {
+                                        std::cout << " (score: " << formatVpScore(vp_res->GetScore())
+                                            << ", threshold: " << formatVpScore(vp_engine->GetThreshold())
+                                            << ")";
+                                    } else {
+                                        std::cout << " (threshold: "
+                                            << formatVpScore(vp_engine->GetThreshold()) << ")";
+                                    }
+                                } else {
+                                    auto matches = vp_res ? vp_res->GetMatches()
+                                        : std::vector<SpacemiT::SpeakerMatch>{};
+                                    if (!matches.empty()) {
+                                        std::cout << " (best: " << matches[0].name
+                                            << ", score: " << formatVpScore(matches[0].score)
+                                            << ", threshold: " << formatVpScore(vp_engine->GetThreshold())
+                                            << ")";
+                                    } else {
+                                        std::cout << " (threshold: "
+                                            << formatVpScore(vp_engine->GetThreshold()) << ")";
+                                    }
+                                }
+                                std::cout << std::endl;
                             }
                         }
                         if (vp_passed) {
 #endif
-                        std::cout << getTimestamp() << " [ASR] 开始识别...\n";
+                        std::cout << getTimestamp() << " [ASR] 开始识别..." << std::endl;
                         auto result = asr->Recognize(audio_buffer, 16000);
                         if (result && !result->IsEmpty()) {
                             std::string text = result->GetText();
-                            std::cout << getTimestamp() << " [ASR] 识别完成: \"" << text << "\"\n";
+                            std::cout << getTimestamp() << " [ASR] 识别完成: \"" << text << "\"" << std::endl;
                             {
                                 std::lock_guard<std::mutex> lock2(g_process_thread_mutex);
                                 if (g_process_thread && g_process_thread->joinable()) {
@@ -697,7 +948,7 @@ int main(int argc, char* argv[]) {
                                 });
                             }
                         } else {
-                            std::cout << getTimestamp() << " [ASR] 识别完成: (无结果)\n";
+                            std::cout << getTimestamp() << " [ASR] 识别完成: (无结果)" << std::endl;
                         }
 #ifdef USE_VP
                         }
@@ -706,12 +957,14 @@ int main(int argc, char* argv[]) {
 
                     audio_buffer.clear();
                     silence_frames_count = 0;
+                    vad_segment_max_prob = 0.0f;
                 }
             } else {
                 pre_buffer.push_back(vad_frame);
                 if (pre_buffer.size() > PRE_BUFFER_FRAMES) {
                     pre_buffer.pop_front();
                 }
+                vad_progress.Publish(vad_prob, cfg.vad_threshold, 0, false);
             }
         }
     });
@@ -738,6 +991,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    vad_progress.Stop();
     aec_processor.stop();
 
 #ifdef USE_MCP
