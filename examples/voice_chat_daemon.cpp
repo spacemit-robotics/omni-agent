@@ -1454,6 +1454,8 @@ int CmdStart(int argc, char** argv) {
         vc_args.push_back(std::to_string(cfg.doa.margin_threshold));
         vc_args.push_back("--doa-quality-threshold");
         vc_args.push_back(std::to_string(cfg.doa.quality_threshold));
+        vc_args.push_back("--doa-min-signal-rms");
+        vc_args.push_back(std::to_string(cfg.doa.min_signal_rms));
         vc_args.push_back("--doa-closure-threshold-samples");
         vc_args.push_back(std::to_string(cfg.doa.closure_threshold_samples));
         vc_args.push_back("--doa-closure-threshold-fraction");

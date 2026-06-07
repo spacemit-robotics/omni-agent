@@ -164,6 +164,8 @@ Config parseArgs(int argc, char* argv[]) {
             cfg.doa.margin_threshold = std::stof(argv[++i]);
         } else if (strcmp(argv[i], "--doa-quality-threshold") == 0 && i + 1 < argc) {
             cfg.doa.quality_threshold = std::stof(argv[++i]);
+        } else if (strcmp(argv[i], "--doa-min-signal-rms") == 0 && i + 1 < argc) {
+            cfg.doa.min_signal_rms = std::stof(argv[++i]);
         } else if (strcmp(argv[i], "--doa-closure-threshold-samples") == 0 && i + 1 < argc) {
             cfg.doa.closure_threshold_samples = std::stof(argv[++i]);
         } else if (strcmp(argv[i], "--doa-closure-threshold-fraction") == 0 && i + 1 < argc) {
@@ -257,6 +259,7 @@ Config parseArgs(int argc, char* argv[]) {
                 << "  --doa-side <m>            等边三角形边长 (默认: 0.063)\n"
                 << "  --doa-positions <spec>    麦克风坐标: x,y[,z];x,y[,z];x,y[,z]\n"
                 << "  --doa-azimuth-offset <d>  阵列到机器人坐标角度偏移\n"
+                << "  --doa-min-signal-rms <rms>  低能量帧过滤阈值 (默认: 0.003)\n"
 #endif
                 << "\n调试:\n"
                 << "  --save-audio [file]       保存AEC处理后的音频 (默认: aec_debug.wav)\n"
