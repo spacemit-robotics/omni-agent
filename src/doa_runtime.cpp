@@ -184,6 +184,7 @@ bool DoaRuntime::Initialize(const DoaRuntimeConfig& config, std::ostream& err) {
     loc_cfg.confidence_threshold = config_.confidence_threshold;
     loc_cfg.margin_threshold = config_.margin_threshold;
     loc_cfg.quality_threshold = config_.quality_threshold;
+    loc_cfg.min_signal_rms = config_.min_signal_rms;
     loc_cfg.closure_threshold_samples = config_.closure_threshold_samples;
     loc_cfg.closure_threshold_fraction = config_.closure_threshold_fraction;
     loc_cfg.azimuth_offset_deg = config_.azimuth_offset_deg;

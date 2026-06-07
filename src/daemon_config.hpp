@@ -139,6 +139,7 @@ struct DoaCfg {
     float confidence_threshold = 0.1f;
     float margin_threshold = 0.6f;
     float quality_threshold = 0.0f;
+    float min_signal_rms = 0.003f;
     float closure_threshold_samples = 0.0f;
     float closure_threshold_fraction = 0.3f;
 };

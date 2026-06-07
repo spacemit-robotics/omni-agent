@@ -49,6 +49,7 @@ const char* kVoiceChatConfigTemplate = R"({
         "confidence_threshold": 0.1,
         "margin_threshold": 0.6,
         "quality_threshold": 0.0,
+        "min_signal_rms": 0.003,
         "closure_threshold_samples": 0.0,
         "closure_threshold_fraction": 0.3
     },
@@ -212,6 +213,7 @@ void ParseDoa(const json& j, DoaCfg& doa) {
     GetOpt(d, "confidence_threshold", doa.confidence_threshold);
     GetOpt(d, "margin_threshold", doa.margin_threshold);
     GetOpt(d, "quality_threshold", doa.quality_threshold);
+    GetOpt(d, "min_signal_rms", doa.min_signal_rms);
     GetOpt(d, "closure_threshold_samples", doa.closure_threshold_samples);
     GetOpt(d, "closure_threshold_fraction", doa.closure_threshold_fraction);
 }
@@ -407,6 +409,7 @@ json VoiceChatJson(const DaemonConfig& cfg) {
         {"confidence_threshold", cfg.doa.confidence_threshold},
         {"margin_threshold", cfg.doa.margin_threshold},
         {"quality_threshold", cfg.doa.quality_threshold},
+        {"min_signal_rms", cfg.doa.min_signal_rms},
         {"closure_threshold_samples", cfg.doa.closure_threshold_samples},
         {"closure_threshold_fraction", cfg.doa.closure_threshold_fraction},
     };
