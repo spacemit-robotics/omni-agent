@@ -38,6 +38,21 @@ struct VadCfg {
     float silence_duration = 0.5f;
 };
 
+struct WakeCfg {
+    // 是否启用 HID 唤醒打断。
+    bool enabled = false;
+    // hidraw 设备路径。
+    std::string device = "/dev/hidraw0";
+    // TTS 播放中收到唤醒时只中断并播放提示音，不把唤醒词送入 ASR/LLM。
+    bool interrupt_mode = true;
+    // 唤醒打断后播放的提示音。
+    std::string ack_audio = "/root/.cache/models/assets/audio/006_im_here.wav";
+    // 是否丢弃唤醒词对应的 ASR 输入。
+    bool drop_wake_asr = true;
+    // 唤醒后丢弃录音输入的最小时长，单位毫秒。
+    int drop_audio_ms = 1200;
+};
+
 struct DebugCfg {
     // 是否保存录音调试文件。
     bool save_audio = false;
@@ -157,6 +172,7 @@ struct DaemonConfig {
     // TTS 后端。
     std::string tts = "matcha:zh-en";
     VadCfg vad;
+    WakeCfg wake;
     DebugCfg debug;
     // 子进程完全初始化后播放的开机问候；空字符串表示不播放。
     std::string startup_greeting = "你好，请问有什么可以帮到您？";

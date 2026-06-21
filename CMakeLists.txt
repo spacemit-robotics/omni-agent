@@ -188,6 +188,7 @@ set(VOICE_AGENT_COMMON_SOURCES
     src/voice_common.cpp
     src/mcp_helper.cpp
     src/engine_init.cpp
+    src/hid_wake_listener.cpp
     src/voice_pipeline.cpp
     src/text_buffer.cpp
     src/llm_health.cpp
@@ -200,6 +201,7 @@ endif()
 set(VOICE_AGENT_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${AUDIO_INCLUDE_DIR}
+    ${SNDFILE_INCLUDE_DIRS}
     ${ASR_INCLUDE_DIR}
     ${TTS_INCLUDE_DIR}
     ${VAD_INCLUDE_DIR}

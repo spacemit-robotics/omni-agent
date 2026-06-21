@@ -5,6 +5,8 @@
 
 #include "voice_common.hpp"
 
+#include <sndfile.h>
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -17,6 +19,7 @@
 #include <fstream>
 #include <cstdlib>
 #include <algorithm>
+#include <cstring>
 
 // ============================================================================
 // Global state
@@ -244,6 +247,46 @@ std::vector<float> pcm16BytesToFloat(const std::vector<uint8_t>& bytes) {
     }
 
     return output;
+}
+
+bool loadWavMonoFloat(const std::string& filename, AudioClip* clip, std::string* error) {
+    if (!clip) {
+        if (error) *error = "output clip is null";
+        return false;
+    }
+
+    SF_INFO info;
+    std::memset(&info, 0, sizeof(info));
+    SNDFILE* file = sf_open(filename.c_str(), SFM_READ, &info);
+    if (!file) {
+        if (error) *error = sf_strerror(nullptr);
+        return false;
+    }
+
+    if (info.frames <= 0 || info.channels <= 0 || info.samplerate <= 0) {
+        sf_close(file);
+        if (error) *error = "invalid wav format";
+        return false;
+    }
+
+    std::vector<float> interleaved(static_cast<size_t>(info.frames) * info.channels);
+    sf_count_t frames_read = sf_readf_float(file, interleaved.data(), info.frames);
+    sf_close(file);
+    if (frames_read <= 0) {
+        if (error) *error = "empty wav data";
+        return false;
+    }
+
+    clip->sample_rate = info.samplerate;
+    clip->samples.assign(static_cast<size_t>(frames_read), 0.0f);
+    for (sf_count_t frame = 0; frame < frames_read; ++frame) {
+        float sum = 0.0f;
+        for (int ch = 0; ch < info.channels; ++ch) {
+            sum += interleaved[static_cast<size_t>(frame) * info.channels + ch];
+        }
+        clip->samples[static_cast<size_t>(frame)] = sum / info.channels;
+    }
+    return true;
 }
 
 void saveWav(const std::string& filename, const std::vector<int16_t>& data, int sample_rate) {

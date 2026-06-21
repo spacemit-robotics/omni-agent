@@ -55,7 +55,7 @@ voice_chat_daemon config-show
 
 | 文件 | 职责 |
 | --- | --- |
-| `voice_chat.json` | 运行模式、音频设备、TTS、VAD、启动问候、调试录音/TTS 音频、daemon 日志和 PID 路径 |
+| `voice_chat.json` | 运行模式、音频设备、TTS、VAD、HID 唤醒、启动问候、调试录音/TTS 音频、daemon 日志和 PID 路径 |
 | `llm.json` | 本地 llama-server 或云端 OpenAI-compatible LLM、模型名、密钥、`max_tokens`、`reasoning_budget`、`system_prompt` |
 | `voiceprint.json` | 声纹验证开关、数据库、阈值、verify 目标 |
 | `mcp.json` | MCP client 开关、registry 和 servers；servers schema 复用 `components/agent_tools/mcp/examples/configs/` |
@@ -171,6 +171,7 @@ voice_chat_daemon restart
 | --- | --- |
 | 换音频设备或采样率 | `voice_chat.json` 的 `audio` |
 | 调 VAD 灵敏度 | `voice_chat.json` 的 `vad.threshold` / `vad.silence_duration` |
+| 开启 HID 唤醒打断 | `voice_chat.json` 的 `wake.enabled` / `wake.device` / `wake.interrupt_mode` / `wake.ack_audio` |
 | 修改或关闭启动问候 | `voice_chat.json` 的 `startup_greeting`；设为空字符串可关闭 |
 | 保存调试录音或 TTS 输出 | `voice_chat.json` 的 `debug.save_audio` / `debug.save_tts_audio` |
 | 换模型、端口、线程数 | `llm.json` |
@@ -208,7 +209,7 @@ voice_chat --llm-url http://127.0.0.1:9191/v1 --model qwen2.5-0.5b --tts matcha:
 voice_chat -l
 ```
 
-常用参数包括 `-i/-o`、`--capture-rate`、`--playback-rate`、`--vad-threshold`、`--silence-duration`、`--max-tokens`、`--system-prompt`、`--mcp-config`、`-vp` 和 `--save-audio`。
+常用参数包括 `-i/-o`、`--capture-rate`、`--playback-rate`、`--vad-threshold`、`--silence-duration`、`--wake-enabled`、`--wake-device`、`--wake-interrupt-mode`、`--wake-ack-audio`、`--max-tokens`、`--system-prompt`、`--mcp-config`、`-vp` 和 `--save-audio`。
 
 ### voice_chat_aec
 
@@ -216,7 +217,7 @@ voice_chat -l
 voice_chat_aec --llm-url http://127.0.0.1:9191/v1 --sample-rate 48000
 ```
 
-AEC 专用参数包括 `--no-aec`、`--no-ns`、`--agc`、`--aec-delay`、`--buffer-frames`。
+常用参数同 `voice_chat`，AEC 额外支持 `--no-aec`、`--no-ns`、`--agc`、`--aec-delay` 和 `--buffer-frames`。
 
 ### 声纹工具
 

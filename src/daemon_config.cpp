@@ -58,6 +58,14 @@ const char* kVoiceChatConfigTemplate = R"({
         "threshold":        0.8,
         "silence_duration": 0.5
     },
+    "wake": {
+        "enabled": false,
+        "device": "/dev/hidraw0",
+        "interrupt_mode": true,
+        "ack_audio": "/root/.cache/models/assets/audio/006_im_here.wav",
+        "drop_wake_asr": true,
+        "drop_audio_ms": 1200
+    },
     "debug": {
         "save_audio":      false,
         "save_audio_file": "voice_debug.wav",
@@ -218,11 +226,26 @@ void ParseDoa(const json& j, DoaCfg& doa) {
     GetOpt(d, "closure_threshold_fraction", doa.closure_threshold_fraction);
 }
 
+void ParseWake(const json& j, WakeCfg& wake) {
+    auto it = j.find("wake");
+    if (it == j.end() || !it->is_object()) {
+        return;
+    }
+    const json& w = *it;
+    GetOpt(w, "enabled", wake.enabled);
+    GetOpt(w, "device", wake.device);
+    GetOpt(w, "interrupt_mode", wake.interrupt_mode);
+    GetOpt(w, "ack_audio", wake.ack_audio);
+    GetOpt(w, "drop_wake_asr", wake.drop_wake_asr);
+    GetOpt(w, "drop_audio_ms", wake.drop_audio_ms);
+}
+
 void ParseVoiceChat(const json& j, DaemonConfig& cfg) {
     std::string mode = cfg.mode;
     AudioCfg audio = cfg.audio;
     std::string tts = cfg.tts;
     VadCfg vad = cfg.vad;
+    WakeCfg wake = cfg.wake;
     DebugCfg debug = cfg.debug;
     DoaCfg doa = cfg.doa;
     std::string startup_greeting = cfg.startup_greeting;
@@ -237,6 +260,7 @@ void ParseVoiceChat(const json& j, DaemonConfig& cfg) {
         GetOpt(*it, "threshold", vad.threshold);
         GetOpt(*it, "silence_duration", vad.silence_duration);
     }
+    ParseWake(j, wake);
     if (auto it = j.find("debug"); it != j.end() && it->is_object()) {
         GetOpt(*it, "save_audio", debug.save_audio);
         GetOpt(*it, "save_audio_file", debug.save_audio_file);
@@ -251,6 +275,7 @@ void ParseVoiceChat(const json& j, DaemonConfig& cfg) {
     cfg.audio = audio;
     cfg.tts = tts;
     cfg.vad = vad;
+    cfg.wake = wake;
     cfg.debug = debug;
     cfg.doa = doa;
     cfg.startup_greeting = startup_greeting;
@@ -359,6 +384,8 @@ bool LoadJson(const std::string& path, LoadStatus& status, json& out) {
 void ExpandPathFields(DaemonConfig& cfg) {
     cfg.debug.save_audio_file = ExpandUser(cfg.debug.save_audio_file);
     cfg.debug.save_tts_audio_file = ExpandUser(cfg.debug.save_tts_audio_file);
+    cfg.wake.device = ExpandUser(cfg.wake.device);
+    cfg.wake.ack_audio = ExpandUser(cfg.wake.ack_audio);
     cfg.llm.model_path = ExpandUser(cfg.llm.model_path);
     cfg.voiceprint.database = ExpandUser(cfg.voiceprint.database);
     cfg.log_dir = ExpandUser(cfg.log_dir);
@@ -422,6 +449,14 @@ json VoiceChatJson(const DaemonConfig& cfg) {
     j["vad"] = {
         {"threshold", cfg.vad.threshold},
         {"silence_duration", cfg.vad.silence_duration},
+    };
+    j["wake"] = {
+        {"enabled", cfg.wake.enabled},
+        {"device", cfg.wake.device},
+        {"interrupt_mode", cfg.wake.interrupt_mode},
+        {"ack_audio", cfg.wake.ack_audio},
+        {"drop_wake_asr", cfg.wake.drop_wake_asr},
+        {"drop_audio_ms", cfg.wake.drop_audio_ms},
     };
     j["debug"] = {
         {"save_audio", cfg.debug.save_audio},

@@ -1461,6 +1461,23 @@ int CmdStart(int argc, char** argv) {
         vc_args.push_back("--doa-closure-threshold-fraction");
         vc_args.push_back(std::to_string(cfg.doa.closure_threshold_fraction));
     }
+    if (cfg.wake.enabled) {
+        vc_args.push_back("--wake-enabled");
+        vc_args.push_back("--wake-device");
+        vc_args.push_back(cfg.wake.device);
+        vc_args.push_back(cfg.wake.interrupt_mode
+            ? "--wake-interrupt-mode"
+            : "--no-wake-interrupt-mode");
+        if (!cfg.wake.ack_audio.empty()) {
+            vc_args.push_back("--wake-ack-audio");
+            vc_args.push_back(cfg.wake.ack_audio);
+        }
+        vc_args.push_back(cfg.wake.drop_wake_asr
+            ? "--wake-drop-asr"
+            : "--no-wake-drop-asr");
+        vc_args.push_back("--wake-drop-audio-ms");
+        vc_args.push_back(std::to_string(cfg.wake.drop_audio_ms));
+    }
     if (input_id >= 0) {
         vc_args.push_back("-i");
         vc_args.push_back(std::to_string(input_id));

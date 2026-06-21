@@ -53,7 +53,13 @@ EngineSelection parseEngine(const std::string& spec);
 // Audio conversion utilities
 // ============================================================================
 
+struct AudioClip {
+    std::vector<float> samples;
+    int sample_rate = 0;
+};
+
 std::vector<float> pcm16BytesToFloat(const std::vector<uint8_t>& bytes);
+bool loadWavMonoFloat(const std::string& filename, AudioClip* clip, std::string* error);
 void saveWav(const std::string& filename, const std::vector<int16_t>& data, int sample_rate);
 
 #endif  // VOICE_COMMON_HPP
