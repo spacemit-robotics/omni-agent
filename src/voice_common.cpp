@@ -19,7 +19,49 @@
 #include <fstream>
 #include <cstdlib>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+
+namespace {
+
+bool startsWith(const std::string& text, const std::string& prefix) {
+    return text.rfind(prefix, 0) == 0;
+}
+
+void trimWakeSeparators(std::string* text) {
+    static const std::vector<std::string> kSeparators = {
+        " ", "\t", "\n", "\r",
+        ".", ",", "!", "?", ":", ";",
+        "。", "，", "！", "？", "：", "；", "、",
+    };
+
+    bool changed = true;
+    while (changed && !text->empty()) {
+        changed = false;
+        for (const auto& sep : kSeparators) {
+            if (startsWith(*text, sep)) {
+                text->erase(0, sep.size());
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    changed = true;
+    while (changed && !text->empty()) {
+        changed = false;
+        for (const auto& sep : kSeparators) {
+            if (text->size() >= sep.size() &&
+                    text->compare(text->size() - sep.size(), sep.size(), sep) == 0) {
+                text->erase(text->size() - sep.size());
+                changed = true;
+                break;
+            }
+        }
+    }
+}
+
+}  // namespace
 
 // ============================================================================
 // Global state
@@ -247,6 +289,133 @@ std::vector<float> pcm16BytesToFloat(const std::vector<uint8_t>& bytes) {
     }
 
     return output;
+}
+
+std::vector<int16_t> floatToPcm16(const std::vector<float>& samples) {
+    std::vector<int16_t> pcm;
+    pcm.reserve(samples.size());
+    for (float sample : samples) {
+        float clamped = std::clamp(sample, -1.0f, 1.0f);
+        pcm.push_back(static_cast<int16_t>(clamped * 32767.0f));
+    }
+    return pcm;
+}
+
+WakeAsrTextFilterResult filterWakeAsrText(const std::string& text) {
+    static const std::vector<std::string> kWakePrefixes = {
+        "小进小进",
+        "小金小金",
+        "小静小静",
+        "小晶小晶",
+        "小鲸小鲸",
+        "小新小新",
+        "小鑫小鑫",
+        "小近小近",
+        "小劲小劲",
+        "小丁小丁",
+        "小姐小姐",
+        "想金小金",
+        "响金响金",
+        "向金向金",
+    };
+
+    std::string filtered = text;
+    trimWakeSeparators(&filtered);
+
+    bool stripped = false;
+    bool matched = true;
+    while (matched && !filtered.empty()) {
+        matched = false;
+        for (const auto& prefix : kWakePrefixes) {
+            if (startsWith(filtered, prefix)) {
+                filtered.erase(0, prefix.size());
+                trimWakeSeparators(&filtered);
+                stripped = true;
+                matched = true;
+                break;
+            }
+        }
+    }
+
+    if (!stripped) {
+        return {text, false, false};
+    }
+    if (filtered.empty()) {
+        return {"", true, true};
+    }
+    return {filtered, true, false};
+}
+
+AsrAudioPreprocessStats preprocessAsrAudio(std::vector<float>* samples) {
+    AsrAudioPreprocessStats stats;
+    if (!samples || samples->empty()) {
+        return stats;
+    }
+
+    double sum_sq = 0.0;
+    float peak = 0.0f;
+    for (float sample : *samples) {
+        if (!std::isfinite(sample)) {
+            continue;
+        }
+        float abs_sample = std::abs(sample);
+        peak = std::max(peak, abs_sample);
+        sum_sq += static_cast<double>(sample) * sample;
+    }
+    stats.input_peak = peak;
+    stats.input_rms = static_cast<float>(std::sqrt(sum_sq / samples->size()));
+
+    const float active_threshold = std::max(0.006f, peak * 0.05f);
+    double active_sum_sq = 0.0;
+    size_t active_count = 0;
+    for (float sample : *samples) {
+        if (!std::isfinite(sample)) {
+            continue;
+        }
+        if (std::abs(sample) >= active_threshold) {
+            active_sum_sq += static_cast<double>(sample) * sample;
+            active_count++;
+        }
+    }
+    const size_t min_active_count = std::max<size_t>(1, samples->size() / 100);
+    if (active_count >= min_active_count) {
+        stats.active_rms = static_cast<float>(
+            std::sqrt(active_sum_sq / active_count));
+    } else {
+        stats.active_rms = stats.input_rms;
+    }
+
+    constexpr float kTargetRms = 0.09f;
+    constexpr float kPeakLimit = 0.88f;
+    constexpr float kMaxGain = 6.0f;
+
+    float desired_gain = 1.0f;
+    if (stats.active_rms > 0.0001f && stats.active_rms < kTargetRms) {
+        desired_gain = kTargetRms / stats.active_rms;
+    }
+    float peak_gain = (peak > 0.0001f) ? (kPeakLimit / peak) : kMaxGain;
+    stats.gain = std::min({desired_gain, peak_gain, kMaxGain});
+    if (stats.gain < 0.01f) {
+        stats.gain = 1.0f;
+    }
+
+    float output_peak = 0.0f;
+    for (float& sample : *samples) {
+        if (!std::isfinite(sample)) {
+            sample = 0.0f;
+        }
+        sample *= stats.gain;
+        if (sample > kPeakLimit) {
+            sample = kPeakLimit;
+            stats.clipped_samples++;
+        } else if (sample < -kPeakLimit) {
+            sample = -kPeakLimit;
+            stats.clipped_samples++;
+        }
+        output_peak = std::max(output_peak, std::abs(sample));
+    }
+    stats.output_peak = output_peak;
+    return stats;
 }
 
 bool loadWavMonoFloat(const std::string& filename, AudioClip* clip, std::string* error) {

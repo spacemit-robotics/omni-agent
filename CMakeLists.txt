@@ -89,6 +89,7 @@ endif()
 # Options
 option(USE_MCP "Enable MCP (Model Context Protocol) support" ON)
 option(USE_AEC "Enable WebRTC AEC (Acoustic Echo Cancellation) for barge-in support" OFF)
+option(USE_AUDIO_FRONTEND "Enable WebRTC audio frontend (AGC/NS/HPF) for voice_chat" ON)
 option(USE_VP "Enable Voiceprint (speaker identification) support" ON)
 option(USE_DOA "Enable DOA (Direction of Arrival) support" ON)
 
@@ -166,12 +167,12 @@ if(USE_VP)
 endif()
 
 # ============================================================================
-# WebRTC Audio Processing for AEC
+# WebRTC Audio Processing for AEC / voice_chat audio frontend
 # ============================================================================
-if(USE_AEC)
+if(USE_AEC OR USE_AUDIO_FRONTEND)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/webrtc_audio_processing.cmake)
 
-    message(STATUS "WebRTC AEC support enabled")
+    message(STATUS "WebRTC audio processing support enabled")
     message(STATUS "WebRTC library: ${WEBRTC_LIB}")
     message(STATUS "WebRTC include dirs: ${WEBRTC_INCLUDE_DIRS}")
 endif()
@@ -315,23 +316,22 @@ if(USE_AEC)
         message(STATUS "  + DOA support enabled for voice_chat_aec")
     endif()
 
-    # Install WebRTC shared library to lib/
-    get_filename_component(_WEBRTC_LIB_DIR "${WEBRTC_LIB}" DIRECTORY)
-    install(FILES "${_WEBRTC_LIB_DIR}/libwebrtc-audio-processing-2.so.1" DESTINATION lib)
-    install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
-        libwebrtc-audio-processing-2.so.1
-        \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/lib/libwebrtc-audio-processing-2.so)")
-
     install(TARGETS voice_chat_aec RUNTIME DESTINATION bin)
 endif()
 
 # ============================================================================
 # voice_chat - Voice chat without AEC (for hardware with built-in AEC)
 # ============================================================================
-add_executable(voice_chat
+set(VOICE_CHAT_SOURCES
     examples/voice_chat.cpp
     ${VOICE_AGENT_COMMON_SOURCES}
 )
+
+if(USE_AUDIO_FRONTEND)
+    list(APPEND VOICE_CHAT_SOURCES src/webrtc_audio_frontend.cpp)
+endif()
+
+add_executable(voice_chat ${VOICE_CHAT_SOURCES})
 
 target_include_directories(voice_chat PRIVATE ${VOICE_AGENT_INCLUDE_DIRS})
 
@@ -386,7 +386,23 @@ if(USE_DOA)
     message(STATUS "  + DOA support enabled for voice_chat")
 endif()
 
+if(USE_AUDIO_FRONTEND)
+    add_dependencies(voice_chat webrtc_ap_ep)
+    target_compile_definitions(voice_chat PRIVATE USE_AUDIO_FRONTEND)
+    target_include_directories(voice_chat PRIVATE ${WEBRTC_INCLUDE_DIRS})
+    target_link_libraries(voice_chat ${WEBRTC_LIB})
+    message(STATUS "  + WebRTC audio frontend enabled for voice_chat")
+endif()
+
 install(TARGETS voice_chat RUNTIME DESTINATION bin)
+
+if(USE_AEC OR USE_AUDIO_FRONTEND)
+    get_filename_component(_WEBRTC_LIB_DIR "${WEBRTC_LIB}" DIRECTORY)
+    install(FILES "${_WEBRTC_LIB_DIR}/libwebrtc-audio-processing-2.so.1" DESTINATION lib)
+    install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+        libwebrtc-audio-processing-2.so.1
+        \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/lib/libwebrtc-audio-processing-2.so)")
+endif()
 
 # ============================================================================
 # voice_chat_daemon - "傻瓜化" launcher (manages llama-server + voice_chat)

@@ -39,6 +39,15 @@ const char* kVoiceChatConfigTemplate = R"({
         "playback_channels": 2,
         "speech_channel":   1
     },
+    "audio_frontend": {
+        "enabled":                 true,
+        "highpass":                true,
+        "noise_suppression":       false,
+        "agc":                     true,
+        "agc_target_level_dbfs":   3,
+        "agc_compression_gain_db": 12,
+        "agc_limiter":             true
+    },
     "doa": {
         "enabled": true,
         "pick": [2, 3, 4],
@@ -58,17 +67,37 @@ const char* kVoiceChatConfigTemplate = R"({
         "threshold":        0.8,
         "silence_duration": 0.5
     },
+    "asr": {
+        "engine":             "qwen3-asr",
+        "endpoint":           "http://127.0.0.1:8063/v1/chat/completions",
+        "model":              "qwen3-asr",
+        "timeout":            60,
+        "auto_start_server":  true,
+        "server_binary":      "llama-server",
+        "server_host":        "127.0.0.1",
+        "server_port":        8063,
+        "model_path":         "~/.cache/models/asr/qwen3asr/qwen3-asr-0.6B-dynq-q40/Qwen3-ASR-0.6B-text-q40.gguf",
+        "model_url":          "https://archive.spacemit.com/spacemit-ai/model_zoo/asr/qwen3-asr-0.6B-dynq-q40.tar.gz",
+        "smt_config_dir":     "~/.cache/models/asr/qwen3asr/qwen3-asr-0.6B-dynq-q40",
+        "ctx_size":           4096,
+        "threads":            4,
+        "startup_timeout":    120,
+        "extra_args":         []
+    },
     "wake": {
         "enabled": false,
         "device": "/dev/hidraw0",
         "interrupt_mode": true,
         "ack_audio": "/root/.cache/models/assets/audio/006_im_here.wav",
         "drop_wake_asr": true,
-        "drop_audio_ms": 1200
+        "drop_audio_ms": 500,
+        "post_ack_tail_ms": 0
     },
     "debug": {
         "save_audio":      false,
         "save_audio_file": "voice_debug.wav",
+        "save_asr_audio":      false,
+        "save_asr_audio_file": "voice_asr_debug.wav",
         "save_tts_audio":      false,
         "save_tts_audio_file": "tts_debug.wav"
     },
@@ -206,6 +235,21 @@ void ParseAudio(const json& j, AudioCfg& audio) {
     GetOpt(a, "speech_channel", audio.speech_channel);
 }
 
+void ParseAudioFrontend(const json& j, AudioFrontendCfg& frontend) {
+    auto it = j.find("audio_frontend");
+    if (it == j.end() || !it->is_object()) {
+        return;
+    }
+    const json& f = *it;
+    GetOpt(f, "enabled", frontend.enabled);
+    GetOpt(f, "highpass", frontend.highpass);
+    GetOpt(f, "noise_suppression", frontend.noise_suppression);
+    GetOpt(f, "agc", frontend.agc);
+    GetOpt(f, "agc_target_level_dbfs", frontend.agc_target_level_dbfs);
+    GetOpt(f, "agc_compression_gain_db", frontend.agc_compression_gain_db);
+    GetOpt(f, "agc_limiter", frontend.agc_limiter);
+}
+
 void ParseDoa(const json& j, DoaCfg& doa) {
     auto it = j.find("doa");
     if (it == j.end() || !it->is_object()) {
@@ -238,13 +282,39 @@ void ParseWake(const json& j, WakeCfg& wake) {
     GetOpt(w, "ack_audio", wake.ack_audio);
     GetOpt(w, "drop_wake_asr", wake.drop_wake_asr);
     GetOpt(w, "drop_audio_ms", wake.drop_audio_ms);
+    GetOpt(w, "post_ack_tail_ms", wake.post_ack_tail_ms);
+}
+
+void ParseAsr(const json& j, AsrCfg& asr) {
+    auto it = j.find("asr");
+    if (it == j.end() || !it->is_object()) {
+        return;
+    }
+    const json& a = *it;
+    GetOpt(a, "engine", asr.engine);
+    GetOpt(a, "endpoint", asr.endpoint);
+    GetOpt(a, "model", asr.model);
+    GetOpt(a, "timeout", asr.timeout);
+    GetOpt(a, "auto_start_server", asr.auto_start_server);
+    GetOpt(a, "server_binary", asr.server_binary);
+    GetOpt(a, "server_host", asr.server_host);
+    GetOpt(a, "server_port", asr.server_port);
+    GetOpt(a, "model_path", asr.model_path);
+    GetOpt(a, "model_url", asr.model_url);
+    GetOpt(a, "smt_config_dir", asr.smt_config_dir);
+    GetOpt(a, "ctx_size", asr.ctx_size);
+    GetOpt(a, "threads", asr.threads);
+    GetOpt(a, "startup_timeout", asr.startup_timeout);
+    GetOpt(a, "extra_args", asr.extra_args);
 }
 
 void ParseVoiceChat(const json& j, DaemonConfig& cfg) {
     std::string mode = cfg.mode;
     AudioCfg audio = cfg.audio;
+    AudioFrontendCfg audio_frontend = cfg.audio_frontend;
     std::string tts = cfg.tts;
     VadCfg vad = cfg.vad;
+    AsrCfg asr = cfg.asr;
     WakeCfg wake = cfg.wake;
     DebugCfg debug = cfg.debug;
     DoaCfg doa = cfg.doa;
@@ -254,16 +324,20 @@ void ParseVoiceChat(const json& j, DaemonConfig& cfg) {
 
     GetOpt(j, "mode", mode);
     ParseAudio(j, audio);
+    ParseAudioFrontend(j, audio_frontend);
     ParseDoa(j, doa);
     GetOpt(j, "tts", tts);
     if (auto it = j.find("vad"); it != j.end() && it->is_object()) {
         GetOpt(*it, "threshold", vad.threshold);
         GetOpt(*it, "silence_duration", vad.silence_duration);
     }
+    ParseAsr(j, asr);
     ParseWake(j, wake);
     if (auto it = j.find("debug"); it != j.end() && it->is_object()) {
         GetOpt(*it, "save_audio", debug.save_audio);
         GetOpt(*it, "save_audio_file", debug.save_audio_file);
+        GetOpt(*it, "save_asr_audio", debug.save_asr_audio);
+        GetOpt(*it, "save_asr_audio_file", debug.save_asr_audio_file);
         GetOpt(*it, "save_tts_audio", debug.save_tts_audio);
         GetOpt(*it, "save_tts_audio_file", debug.save_tts_audio_file);
     }
@@ -273,8 +347,10 @@ void ParseVoiceChat(const json& j, DaemonConfig& cfg) {
 
     cfg.mode = mode;
     cfg.audio = audio;
+    cfg.audio_frontend = audio_frontend;
     cfg.tts = tts;
     cfg.vad = vad;
+    cfg.asr = asr;
     cfg.wake = wake;
     cfg.debug = debug;
     cfg.doa = doa;
@@ -383,9 +459,12 @@ bool LoadJson(const std::string& path, LoadStatus& status, json& out) {
 
 void ExpandPathFields(DaemonConfig& cfg) {
     cfg.debug.save_audio_file = ExpandUser(cfg.debug.save_audio_file);
+    cfg.debug.save_asr_audio_file = ExpandUser(cfg.debug.save_asr_audio_file);
     cfg.debug.save_tts_audio_file = ExpandUser(cfg.debug.save_tts_audio_file);
     cfg.wake.device = ExpandUser(cfg.wake.device);
     cfg.wake.ack_audio = ExpandUser(cfg.wake.ack_audio);
+    cfg.asr.model_path = ExpandUser(cfg.asr.model_path);
+    cfg.asr.smt_config_dir = ExpandUser(cfg.asr.smt_config_dir);
     cfg.llm.model_path = ExpandUser(cfg.llm.model_path);
     cfg.voiceprint.database = ExpandUser(cfg.voiceprint.database);
     cfg.log_dir = ExpandUser(cfg.log_dir);
@@ -426,6 +505,16 @@ json VoiceChatJson(const DaemonConfig& cfg) {
     audio["playback_channels"] = cfg.audio.playback_channels;
     audio["speech_channel"] = cfg.audio.speech_channel;
 
+    json audio_frontend = {
+        {"enabled", cfg.audio_frontend.enabled},
+        {"highpass", cfg.audio_frontend.highpass},
+        {"noise_suppression", cfg.audio_frontend.noise_suppression},
+        {"agc", cfg.audio_frontend.agc},
+        {"agc_target_level_dbfs", cfg.audio_frontend.agc_target_level_dbfs},
+        {"agc_compression_gain_db", cfg.audio_frontend.agc_compression_gain_db},
+        {"agc_limiter", cfg.audio_frontend.agc_limiter},
+    };
+
     json doa = {
         {"enabled", cfg.doa.enabled},
         {"pick", cfg.doa.pick},
@@ -444,11 +533,29 @@ json VoiceChatJson(const DaemonConfig& cfg) {
     json j;
     j["mode"] = cfg.mode;
     j["audio"] = audio;
+    j["audio_frontend"] = audio_frontend;
     j["doa"] = doa;
     j["tts"] = cfg.tts;
     j["vad"] = {
         {"threshold", cfg.vad.threshold},
         {"silence_duration", cfg.vad.silence_duration},
+    };
+    j["asr"] = {
+        {"engine", cfg.asr.engine},
+        {"endpoint", cfg.asr.endpoint},
+        {"model", cfg.asr.model},
+        {"timeout", cfg.asr.timeout},
+        {"auto_start_server", cfg.asr.auto_start_server},
+        {"server_binary", cfg.asr.server_binary},
+        {"server_host", cfg.asr.server_host},
+        {"server_port", cfg.asr.server_port},
+        {"model_path", cfg.asr.model_path},
+        {"model_url", cfg.asr.model_url},
+        {"smt_config_dir", cfg.asr.smt_config_dir},
+        {"ctx_size", cfg.asr.ctx_size},
+        {"threads", cfg.asr.threads},
+        {"startup_timeout", cfg.asr.startup_timeout},
+        {"extra_args", cfg.asr.extra_args},
     };
     j["wake"] = {
         {"enabled", cfg.wake.enabled},
@@ -457,10 +564,13 @@ json VoiceChatJson(const DaemonConfig& cfg) {
         {"ack_audio", cfg.wake.ack_audio},
         {"drop_wake_asr", cfg.wake.drop_wake_asr},
         {"drop_audio_ms", cfg.wake.drop_audio_ms},
+        {"post_ack_tail_ms", cfg.wake.post_ack_tail_ms},
     };
     j["debug"] = {
         {"save_audio", cfg.debug.save_audio},
         {"save_audio_file", cfg.debug.save_audio_file},
+        {"save_asr_audio", cfg.debug.save_asr_audio},
+        {"save_asr_audio_file", cfg.debug.save_asr_audio_file},
         {"save_tts_audio", cfg.debug.save_tts_audio},
         {"save_tts_audio_file", cfg.debug.save_tts_audio_file},
     };

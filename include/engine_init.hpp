@@ -33,7 +33,11 @@ LLMInitResult initLLM(const std::string& llm_model, const std::string& llm_url,
 
 std::shared_ptr<SpacemiT::VadEngine> initVAD(float vad_threshold);
 
-std::shared_ptr<SpacemiT::AsrEngine> initASR();
+std::shared_ptr<SpacemiT::AsrEngine> initASR(
+    const std::string& asr_engine,
+    const std::string& asr_endpoint,
+    const std::string& asr_model,
+    int asr_timeout);
 
 struct TTSInitResult {
     std::shared_ptr<SpacemiT::TtsEngine> tts;

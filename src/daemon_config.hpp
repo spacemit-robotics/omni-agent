@@ -31,11 +31,63 @@ struct AudioCfg {
     int speech_channel = 1;
 };
 
+struct AudioFrontendCfg {
+    // 是否在 voice_chat 的 ch1 VAD/ASR 输入前启用 WebRTC 单路前端。
+    bool enabled = true;
+    // 高通滤波，抑制低频风噪/结构噪声。
+    bool highpass = true;
+    // WebRTC 低档降噪；默认关闭，避免先引入语音失真。
+    bool noise_suppression = false;
+    // 自动增益控制，提升远场弱语音输入。
+    bool agc = true;
+    // AGC 目标峰值余量，单位 dBFS，WebRTC 范围 0~31。
+    int agc_target_level_dbfs = 3;
+    // AGC 最大数字增益，单位 dB，WebRTC 范围 0~90。
+    int agc_compression_gain_db = 12;
+    // 是否启用 AGC limiter，避免近场削顶。
+    bool agc_limiter = true;
+};
+
 struct VadCfg {
     // Silero VAD 触发阈值，范围 0~1。
     float threshold = 0.8f;
     // 语音结束前需要持续静音的时长，单位秒。
     float silence_duration = 0.5f;
+};
+
+struct AsrCfg {
+    // ASR 后端：sensevoice / qwen3-asr / zipformer。
+    std::string engine = "qwen3-asr";
+    // Qwen3-ASR llama-server OpenAI-compatible chat completions endpoint。
+    std::string endpoint = "http://127.0.0.1:8063/v1/chat/completions";
+    // Qwen3-ASR llama-server model tag。
+    std::string model = "qwen3-asr";
+    // Qwen3-ASR HTTP 请求超时秒数。
+    int timeout = 60;
+    // 是否由 daemon 自动拉起 Qwen3-ASR llama-server。
+    bool auto_start_server = true;
+    // Qwen3-ASR llama-server 二进制名或绝对路径。
+    std::string server_binary = "llama-server";
+    // Qwen3-ASR llama-server 监听地址。
+    std::string server_host = "127.0.0.1";
+    // Qwen3-ASR llama-server 监听端口。
+    int server_port = 8063;
+    // Qwen3-ASR text GGUF 模型本地路径。
+    std::string model_path =
+        "~/.cache/models/asr/qwen3asr/qwen3-asr-0.6B-dynq-q40/Qwen3-ASR-0.6B-text-q40.gguf";
+    // Qwen3-ASR 模型缺失时输出给用户的参考下载 URL。
+    std::string model_url =
+        "https://archive.spacemit.com/spacemit-ai/model_zoo/asr/qwen3-asr-0.6B-dynq-q40.tar.gz";
+    // Qwen3-ASR SMT 多模态配置目录，包含 encoder onnx 与 config.json。
+    std::string smt_config_dir = "~/.cache/models/asr/qwen3asr/qwen3-asr-0.6B-dynq-q40";
+    // Qwen3-ASR llama-server 上下文长度。
+    int ctx_size = 4096;
+    // Qwen3-ASR llama-server 推理线程数。
+    int threads = 4;
+    // Qwen3-ASR llama-server 就绪等待超时，单位秒。
+    int startup_timeout = 120;
+    // 追加给 Qwen3-ASR llama-server 的原始参数。
+    std::vector<std::string> extra_args;
 };
 
 struct WakeCfg {
@@ -49,8 +101,10 @@ struct WakeCfg {
     std::string ack_audio = "/root/.cache/models/assets/audio/006_im_here.wav";
     // 是否丢弃唤醒词对应的 ASR 输入。
     bool drop_wake_asr = true;
-    // 唤醒后丢弃录音输入的最小时长，单位毫秒。
-    int drop_audio_ms = 1200;
+    // 唤醒后丢弃录音输入的最大保护窗口，低能量命令可提前放行，单位毫秒。
+    int drop_audio_ms = 500;
+    // 提示音播放完成后继续丢弃录音输入的时长，单位毫秒。
+    int post_ack_tail_ms = 0;
 };
 
 struct DebugCfg {
@@ -58,6 +112,10 @@ struct DebugCfg {
     bool save_audio = false;
     // 保存录音调试文件的路径。
     std::string save_audio_file = "voice_debug.wav";
+    // 是否保存 ASR 增益后的音频。
+    bool save_asr_audio = false;
+    // 保存 ASR 增益后音频的路径。
+    std::string save_asr_audio_file = "voice_asr_debug.wav";
     // 是否保存 TTS 输出音频。
     bool save_tts_audio = false;
     // 保存 TTS 输出音频的路径。
@@ -169,9 +227,11 @@ struct DaemonConfig {
     // 运行模式："voice_chat" 或 "voice_chat_aec"。
     std::string mode = "voice_chat";
     AudioCfg audio;
+    AudioFrontendCfg audio_frontend;
     // TTS 后端。
     std::string tts = "matcha:zh-en";
     VadCfg vad;
+    AsrCfg asr;
     WakeCfg wake;
     DebugCfg debug;
     // 子进程完全初始化后播放的开机问候；空字符串表示不播放。

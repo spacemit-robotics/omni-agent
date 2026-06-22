@@ -171,9 +171,10 @@ voice_chat_daemon restart
 | --- | --- |
 | 换音频设备或采样率 | `voice_chat.json` 的 `audio` |
 | 调 VAD 灵敏度 | `voice_chat.json` 的 `vad.threshold` / `vad.silence_duration` |
-| 开启 HID 唤醒打断 | `voice_chat.json` 的 `wake.enabled` / `wake.device` / `wake.interrupt_mode` / `wake.ack_audio` |
+| 切换 ASR 后端 | `voice_chat.json` 的 `asr.engine`，默认 `qwen3-asr`；qwen3-asr 还需 `asr.endpoint` / `asr.model` |
+| 开启 HID 唤醒打断 | `voice_chat.json` 的 `wake.enabled` / `wake.device` / `wake.interrupt_mode` / `wake.ack_audio` / `wake.post_ack_tail_ms` |
 | 修改或关闭启动问候 | `voice_chat.json` 的 `startup_greeting`；设为空字符串可关闭 |
-| 保存调试录音或 TTS 输出 | `voice_chat.json` 的 `debug.save_audio` / `debug.save_tts_audio` |
+| 保存调试录音、ASR 输入或 TTS 输出 | `voice_chat.json` 的 `debug.save_audio` / `debug.save_asr_audio` / `debug.save_tts_audio` |
 | 换模型、端口、线程数 | `llm.json` |
 | 调回复长度、思考输出或系统提示词 | `llm.json` 的 `max_tokens` / `reasoning_budget` / `system_prompt` |
 | 启用声纹验证 | `voiceprint.json` 的 `enabled` / `verify` |
@@ -209,7 +210,7 @@ voice_chat --llm-url http://127.0.0.1:9191/v1 --model qwen2.5-0.5b --tts matcha:
 voice_chat -l
 ```
 
-常用参数包括 `-i/-o`、`--capture-rate`、`--playback-rate`、`--vad-threshold`、`--silence-duration`、`--wake-enabled`、`--wake-device`、`--wake-interrupt-mode`、`--wake-ack-audio`、`--max-tokens`、`--system-prompt`、`--mcp-config`、`-vp` 和 `--save-audio`。
+常用参数包括 `-i/-o`、`--capture-rate`、`--playback-rate`、`--vad-threshold`、`--silence-duration`、`--wake-enabled`、`--wake-device`、`--wake-interrupt-mode`、`--wake-ack-audio`、`--wake-post-ack-tail-ms`、`--max-tokens`、`--system-prompt`、`--mcp-config`、`-vp` 和 `--save-audio`。
 
 ### voice_chat_aec
 

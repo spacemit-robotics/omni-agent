@@ -49,6 +49,9 @@
 #ifdef USE_DOA
 #include "doa_runtime.hpp"
 #endif
+#ifdef USE_AUDIO_FRONTEND
+#include "webrtc_audio_frontend.hpp"
+#endif
 
 // ============================================================================
 // 参数配置
@@ -63,12 +66,17 @@ struct Config {
     int output_device = -1;
     float vad_threshold = 0.8f;
     float silence_duration = 0.5f;
+    std::string asr_engine = "qwen3-asr";
+    std::string asr_endpoint = "http://127.0.0.1:8063/v1/chat/completions";
+    std::string asr_model = "qwen3-asr";
+    int asr_timeout = 60;
     bool wake_enabled = false;
     std::string wake_device = "/dev/hidraw0";
     bool wake_interrupt_mode = true;
     std::string wake_ack_audio = "/root/.cache/models/assets/audio/006_im_here.wav";
     bool wake_drop_asr = true;
-    int wake_drop_audio_ms = 1200;
+    int wake_drop_audio_ms = 500;
+    int wake_post_ack_tail_ms = 0;
     int max_tokens = 150;
     int reasoning_budget = -1;
     std::string system_prompt = "You are a helpful assistant.";
@@ -83,9 +91,20 @@ struct Config {
     int playback_channels = 1;
     bool capture_channels_set = false;
 
+    // ch1 -> VAD/ASR 前的单路音频增强。
+    bool audio_frontend_enabled = true;
+    bool audio_frontend_highpass = true;
+    bool audio_frontend_ns = false;
+    bool audio_frontend_agc = true;
+    int audio_frontend_agc_target = 3;
+    int audio_frontend_agc_gain = 12;
+    bool audio_frontend_agc_limiter = true;
+
     // 调试：音频录制
     bool save_audio = false;
     std::string audio_file = "voice_debug.wav";
+    bool save_asr_audio = false;
+    std::string asr_audio_file = "voice_asr_debug.wav";
     bool save_tts_audio = false;
     std::string tts_audio_file = "tts_debug.wav";
 
@@ -122,6 +141,14 @@ Config parseArgs(int argc, char* argv[]) {
             cfg.llm_model_set = true;
         } else if ((strcmp(argv[i], "--llm-url") == 0 || strcmp(argv[i], "--llm_url") == 0) && i + 1 < argc) {
             cfg.llm_url = argv[++i];
+        } else if (strcmp(argv[i], "--asr-engine") == 0 && i + 1 < argc) {
+            cfg.asr_engine = argv[++i];
+        } else if (strcmp(argv[i], "--asr-endpoint") == 0 && i + 1 < argc) {
+            cfg.asr_endpoint = argv[++i];
+        } else if (strcmp(argv[i], "--asr-model") == 0 && i + 1 < argc) {
+            cfg.asr_model = argv[++i];
+        } else if (strcmp(argv[i], "--asr-timeout") == 0 && i + 1 < argc) {
+            cfg.asr_timeout = std::stoi(argv[++i]);
         } else if ((strcmp(argv[i], "--input-device") == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) {
             cfg.input_device = std::stoi(argv[++i]);
         } else if ((strcmp(argv[i], "--output-device") == 0 || strcmp(argv[i], "-o") == 0) && i + 1 < argc) {
@@ -139,6 +166,30 @@ Config parseArgs(int argc, char* argv[]) {
             cfg.playback_rate = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--playback-channels") == 0 && i + 1 < argc) {
             cfg.playback_channels = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--audio-frontend") == 0) {
+            cfg.audio_frontend_enabled = true;
+        } else if (strcmp(argv[i], "--no-audio-frontend") == 0) {
+            cfg.audio_frontend_enabled = false;
+        } else if (strcmp(argv[i], "--audio-frontend-hpf") == 0) {
+            cfg.audio_frontend_highpass = true;
+        } else if (strcmp(argv[i], "--no-audio-frontend-hpf") == 0) {
+            cfg.audio_frontend_highpass = false;
+        } else if (strcmp(argv[i], "--audio-frontend-ns") == 0) {
+            cfg.audio_frontend_ns = true;
+        } else if (strcmp(argv[i], "--no-audio-frontend-ns") == 0) {
+            cfg.audio_frontend_ns = false;
+        } else if (strcmp(argv[i], "--audio-frontend-agc") == 0) {
+            cfg.audio_frontend_agc = true;
+        } else if (strcmp(argv[i], "--no-audio-frontend-agc") == 0) {
+            cfg.audio_frontend_agc = false;
+        } else if (strcmp(argv[i], "--audio-frontend-agc-target") == 0 && i + 1 < argc) {
+            cfg.audio_frontend_agc_target = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--audio-frontend-agc-gain") == 0 && i + 1 < argc) {
+            cfg.audio_frontend_agc_gain = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--audio-frontend-agc-limiter") == 0) {
+            cfg.audio_frontend_agc_limiter = true;
+        } else if (strcmp(argv[i], "--no-audio-frontend-agc-limiter") == 0) {
+            cfg.audio_frontend_agc_limiter = false;
 #ifdef USE_DOA
         } else if (strcmp(argv[i], "--doa") == 0) {
             cfg.doa.enabled = true;
@@ -181,6 +232,11 @@ Config parseArgs(int argc, char* argv[]) {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 cfg.audio_file = argv[++i];
             }
+        } else if (strcmp(argv[i], "--save-asr-audio") == 0) {
+            cfg.save_asr_audio = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                cfg.asr_audio_file = argv[++i];
+            }
         } else if (strcmp(argv[i], "--save-tts-audio") == 0) {
             cfg.save_tts_audio = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
@@ -210,6 +266,8 @@ Config parseArgs(int argc, char* argv[]) {
             cfg.wake_drop_asr = false;
         } else if (strcmp(argv[i], "--wake-drop-audio-ms") == 0 && i + 1 < argc) {
             cfg.wake_drop_audio_ms = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--wake-post-ack-tail-ms") == 0 && i + 1 < argc) {
+            cfg.wake_post_ack_tail_ms = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--max-tokens") == 0 && i + 1 < argc) {
             cfg.max_tokens = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--reasoning-budget") == 0 && i + 1 < argc) {
@@ -250,6 +308,16 @@ Config parseArgs(int argc, char* argv[]) {
                 << "  --speech-channel <n>          送入VAD/ASR的录音声道 (默认: 1)\n"
                 << "  --playback-rate <hz>          播放采样率 (默认: 48000)\n"
                 << "  --playback-channels <n>       播放声道数 (默认: 1)\n"
+                << "  --audio-frontend              开启 ch1 WebRTC AGC/HPF/NS 前端\n"
+                << "  --no-audio-frontend           关闭 ch1 WebRTC 前端\n"
+                << "  --audio-frontend-agc          开启 AGC\n"
+                << "  --no-audio-frontend-agc       关闭 AGC\n"
+                << "  --audio-frontend-agc-target <dbfs>  AGC 目标峰值余量 (默认: 3)\n"
+                << "  --audio-frontend-agc-gain <db>      AGC 最大数字增益 (默认: 12)\n"
+                << "  --audio-frontend-hpf          开启高通滤波\n"
+                << "  --no-audio-frontend-hpf       关闭高通滤波\n"
+                << "  --audio-frontend-ns           开启低档降噪\n"
+                << "  --no-audio-frontend-ns        关闭降噪\n"
 #ifdef USE_DOA
                 << "\nDOA:\n"
                 << "  --doa                         开启三麦0-360度定位\n"
@@ -269,6 +337,11 @@ Config parseArgs(int argc, char* argv[]) {
                 << "\nVAD:\n"
                 << "  --vad-threshold <0-1>         VAD触发阈值 (默认: 0.8)\n"
                 << "  --silence-duration <sec>      静音结束判定时长 (默认: 0.5)\n"
+                << "\nASR:\n"
+                << "  --asr-engine <name>           ASR后端: sensevoice | qwen3-asr | zipformer (默认: qwen3-asr)\n"
+                << "  --asr-endpoint <url>          qwen3-asr llama-server endpoint\n"
+                << "  --asr-model <name>            qwen3-asr model tag (默认: qwen3-asr)\n"
+                << "  --asr-timeout <sec>           qwen3-asr HTTP超时 (默认: 60)\n"
                 << "\n唤醒:\n"
                 << "  --wake-enabled, --wake        开启 HID 唤醒打断\n"
                 << "  --no-wake                     关闭 HID 唤醒打断\n"
@@ -278,7 +351,8 @@ Config parseArgs(int argc, char* argv[]) {
                 << "  --wake-ack-audio <wav>        唤醒提示音\n"
                 << "  --wake-drop-asr               丢弃唤醒词对应的ASR输入\n"
                 << "  --no-wake-drop-asr            不启用唤醒后录音丢弃窗口\n"
-                << "  --wake-drop-audio-ms <ms>     唤醒后丢弃录音时长 (默认: 1200)\n"
+                << "  --wake-drop-audio-ms <ms>     唤醒后最大丢弃保护窗口 (默认: 500)\n"
+                << "  --wake-post-ack-tail-ms <ms>  保守模式: 提示音后继续丢弃录音时长 (默认: 0)\n"
                 << "\nTTS:\n"
                 << "  --tts <engine>                TTS后端 (默认: matcha:zh-en)\n"
                 << "                                matcha:zh / matcha:en / matcha:zh-en\n"
@@ -287,6 +361,7 @@ Config parseArgs(int argc, char* argv[]) {
                 << "  --startup-greeting <text>     启动完成后播放的问候语\n"
                 << "\n调试:\n"
                 << "  --save-audio [file]           保存录音 (默认: voice_debug.wav)\n"
+                << "  --save-asr-audio [file]       保存ASR增益后音频 (默认: voice_asr_debug.wav)\n"
                 << "  --save-tts-audio [file]       保存TTS输出 (默认: tts_debug.wav)\n"
                 << "\nMCP:\n"
                 << "  --mcp-config <path>           MCP配置文件 (启用工具调用)\n"
@@ -487,15 +562,29 @@ int main(int argc, char* argv[]) {
     std::cout << getTimestamp() << " TTS后端: " << cfg.tts_type << "\n";
     std::cout << getTimestamp() << " LLM模型: " << cfg.llm_model << "\n";
     std::cout << getTimestamp() << " LLM URL: " << cfg.llm_url << "\n";
+    std::cout << getTimestamp() << " ASR后端: " << cfg.asr_engine;
+    if (cfg.asr_engine == "qwen3-asr") {
+        std::cout << " (" << cfg.asr_endpoint << ", model=" << cfg.asr_model << ")";
+    }
+    std::cout << "\n";
     std::cout << getTimestamp() << " HID唤醒: "
         << (cfg.wake_enabled ? ("ON (" + cfg.wake_device + ")") : "OFF") << "\n";
     if (cfg.wake_enabled) {
         std::cout << getTimestamp() << " 唤醒打断模式: "
             << (cfg.wake_interrupt_mode ? "ON" : "OFF")
-            << " ack=" << cfg.wake_ack_audio << "\n";
+            << " ack=" << cfg.wake_ack_audio
+            << " drop_ms=" << cfg.wake_drop_audio_ms
+            << " tail_ms=" << cfg.wake_post_ack_tail_ms << "\n";
     }
     std::cout << getTimestamp() << " 录音: " << cfg.capture_rate << " Hz / "
         << cfg.capture_channels << " ch\n";
+    std::cout << getTimestamp() << " 音频前端: "
+        << (cfg.audio_frontend_enabled ? "ON" : "OFF")
+        << " hpf=" << (cfg.audio_frontend_highpass ? "on" : "off")
+        << " ns=" << (cfg.audio_frontend_ns ? "on" : "off")
+        << " agc=" << (cfg.audio_frontend_agc ? "on" : "off")
+        << " target=" << cfg.audio_frontend_agc_target
+        << "dBFS gain=" << cfg.audio_frontend_agc_gain << "dB\n";
     std::cout << getTimestamp() << " 播放: " << cfg.playback_rate << " Hz / "
         << cfg.playback_channels << " ch\n";
     std::cout << getTimestamp() << " 按 Ctrl+C 退出\n";
@@ -512,7 +601,8 @@ int main(int argc, char* argv[]) {
     auto vad = initVAD(cfg.vad_threshold);
     if (!vad) return 1;
 
-    auto asr = initASR();
+    auto asr = initASR(
+        cfg.asr_engine, cfg.asr_endpoint, cfg.asr_model, cfg.asr_timeout);
     if (!asr) return 1;
 
     auto tts_result = initTTS(cfg.tts_type);
@@ -559,6 +649,33 @@ int main(int argc, char* argv[]) {
         }
     }
 
+#ifdef USE_AUDIO_FRONTEND
+    std::unique_ptr<omni_agent::WebRtcAudioFrontend> audio_frontend;
+    if (cfg.audio_frontend_enabled) {
+        omni_agent::WebRtcAudioFrontendConfig af_cfg;
+        af_cfg.sample_rate = 16000;
+        af_cfg.highpass_enabled = cfg.audio_frontend_highpass;
+        af_cfg.noise_suppression_enabled = cfg.audio_frontend_ns;
+        af_cfg.agc_enabled = cfg.audio_frontend_agc;
+        af_cfg.agc_target_level_dbfs = cfg.audio_frontend_agc_target;
+        af_cfg.agc_compression_gain_db = cfg.audio_frontend_agc_gain;
+        af_cfg.agc_limiter_enabled = cfg.audio_frontend_agc_limiter;
+        audio_frontend = std::make_unique<omni_agent::WebRtcAudioFrontend>();
+        std::string error;
+        if (!audio_frontend->Initialize(af_cfg, &error)) {
+            std::cerr << "\n" << getTimestamp()
+                << " 错误: WebRTC 音频前端初始化失败: " << error << "\n";
+            return 1;
+        }
+    }
+#else
+    if (cfg.audio_frontend_enabled) {
+        std::cerr << "\n" << getTimestamp()
+            << " [warn] 当前构建未启用 WebRTC 音频前端，已跳过\n";
+        cfg.audio_frontend_enabled = false;
+    }
+#endif
+
     // 初始化播放重采样器（TTS 采样率 != 播放采样率时使用）
     std::unique_ptr<Resampler> playback_resampler;
     if (tts_sample_rate != cfg.playback_rate) {
@@ -588,7 +705,9 @@ int main(int argc, char* argv[]) {
 
     std::cout << " OK\n";
     if (cfg.capture_rate == 16000 && cfg.capture_channels == 1) {
-        std::cout << getTimestamp() << " 录音管道: 16kHz/1ch -> 直连 VAD/STT (零重采样)\n";
+        std::cout << getTimestamp() << " 录音管道: 16kHz/1ch -> ";
+        if (cfg.audio_frontend_enabled) std::cout << "WebRTC前端 -> ";
+        std::cout << "VAD/STT (零重采样)\n";
     } else {
         std::cout << getTimestamp() << " 录音管道: " << cfg.capture_rate << "Hz/"
             << cfg.capture_channels << "ch -> ";
@@ -596,6 +715,7 @@ int main(int argc, char* argv[]) {
             std::cout << "取ch" << cfg.speech_channel << "->mono -> ";
         }
         if (cfg.capture_rate != 16000) std::cout << "重采样->16kHz -> ";
+        if (cfg.audio_frontend_enabled) std::cout << "WebRTC前端 -> ";
         std::cout << "VAD/STT\n";
     }
 #ifdef USE_DOA
@@ -771,14 +891,6 @@ int main(int argc, char* argv[]) {
     };
 
     auto resetCapture = [&]() -> bool {
-        capture.Stop();
-        capture.Close();
-        std::this_thread::sleep_for(std::chrono::milliseconds(80));
-        if (!capture.Start(cfg.capture_rate, cfg.capture_channels)) {
-            std::cerr << getTimestamp()
-                << " 错误: TTS后重启录音设备失败\n";
-            return false;
-        }
         return true;
     };
 
@@ -794,6 +906,8 @@ int main(int argc, char* argv[]) {
     float vad_segment_max_prob = 0.0f;
 
     const size_t PRE_BUFFER_FRAMES = 30;
+    const size_t POST_WAKE_PRE_BUFFER_FRAMES = 6;
+    const long long WAKE_HARD_DROP_MS = 120;
     std::deque<std::vector<float>> pre_buffer;
 
     int barge_in_confirm_frames = 0;
@@ -802,9 +916,14 @@ int main(int argc, char* argv[]) {
     std::atomic<bool> barge_in_recording{false};
     std::atomic<bool> wake_barge_in_requested{false};
     std::atomic<long long> wake_drop_until_ms{0};
+    std::atomic<long long> wake_drop_start_ms{0};
+    std::atomic<bool> wake_ready_pending{false};
+    std::atomic<bool> wake_command_pending{false};
+    std::atomic<bool> wake_asr_filter_pending{false};
 
     std::vector<int16_t> recorded_audio;
     std::mutex record_mutex;
+    std::vector<int16_t> asr_recorded_audio;
     std::vector<int16_t> tts_recorded_audio;
     std::mutex tts_record_mutex;
 
@@ -865,12 +984,39 @@ int main(int argc, char* argv[]) {
 
     auto wakeDropDurationMs = [&]() -> int {
         int duration_ms = std::max(0, cfg.wake_drop_audio_ms);
-        if (!wake_ack_clip.samples.empty() && wake_ack_clip.sample_rate > 0) {
+        if (cfg.wake_post_ack_tail_ms > 0 &&
+                !wake_ack_clip.samples.empty() && wake_ack_clip.sample_rate > 0) {
             int ack_ms = static_cast<int>(
                 wake_ack_clip.samples.size() * 1000 / wake_ack_clip.sample_rate);
-            duration_ms = std::max(duration_ms, ack_ms + 200);
+            duration_ms = std::max(duration_ms,
+                ack_ms + cfg.wake_post_ack_tail_ms);
         }
         return duration_ms;
+    };
+
+    auto isLoudWakeAudio = [](const std::vector<float>& samples) -> bool {
+        if (samples.empty()) return false;
+        double sum_sq = 0.0;
+        float peak = 0.0f;
+        for (float sample : samples) {
+            float abs_sample = std::abs(sample);
+            peak = std::max(peak, abs_sample);
+            sum_sq += static_cast<double>(sample) * sample;
+        }
+        float rms = static_cast<float>(std::sqrt(sum_sq / samples.size()));
+        return peak >= 0.40f || rms >= 0.14f;
+    };
+
+    auto appendPreBuffer = [&](size_t max_frames) {
+        size_t start = 0;
+        if (pre_buffer.size() > max_frames) {
+            start = pre_buffer.size() - max_frames;
+        }
+        for (size_t i = start; i < pre_buffer.size(); ++i) {
+            audio_buffer.insert(audio_buffer.end(),
+                pre_buffer[i].begin(), pre_buffer[i].end());
+        }
+        pre_buffer.clear();
     };
 
     auto resetWakeInputState = [&]() {
@@ -903,7 +1049,7 @@ int main(int argc, char* argv[]) {
     };
 
     std::thread recognition_thread([&]() {
-        while (g_running || !recognition_queue.empty()) {
+        while (true) {
             std::vector<float> utterance;
             {
                 std::unique_lock<std::mutex> lock(recognition_mutex);
@@ -911,6 +1057,9 @@ int main(int argc, char* argv[]) {
                     return !g_running || !recognition_queue.empty();
                 });
                 if (recognition_queue.empty()) {
+                    if (!g_running) {
+                        break;
+                    }
                     continue;
                 }
                 utterance = std::move(recognition_queue.front());
@@ -999,12 +1148,51 @@ int main(int argc, char* argv[]) {
             }
 #endif
 
+            AsrAudioPreprocessStats asr_audio_stats = preprocessAsrAudio(&utterance);
+            std::cout << getTimestamp() << " [ASR] 音频增益: rms="
+                << formatFloat(asr_audio_stats.input_rms, 4)
+                << " active=" << formatFloat(asr_audio_stats.active_rms, 4)
+                << " peak=" << formatFloat(asr_audio_stats.input_peak, 3)
+                << " gain=" << formatFloat(asr_audio_stats.gain, 2)
+                << " out_peak=" << formatFloat(asr_audio_stats.output_peak, 3);
+            if (asr_audio_stats.clipped_samples > 0) {
+                std::cout << " clipped=" << asr_audio_stats.clipped_samples;
+            }
+            std::cout << std::endl;
+            if (cfg.save_asr_audio) {
+                std::vector<int16_t> asr_pcm = floatToPcm16(utterance);
+                asr_recorded_audio.insert(
+                    asr_recorded_audio.end(), asr_pcm.begin(), asr_pcm.end());
+            }
+
             std::cout << getTimestamp() << " [ASR] 开始识别..." << std::endl;
             auto result = asr->Recognize(utterance, 16000);
             if (result && !result->IsEmpty()) {
                 std::string text = result->GetText();
                 std::cout << getTimestamp() << " [ASR] 识别完成: \""
                     << text << "\"" << std::endl;
+                bool apply_wake_text_filter =
+                    cfg.wake_enabled && cfg.wake_drop_asr;
+                if (wake_asr_filter_pending.exchange(false)) {
+                    apply_wake_text_filter = true;
+                }
+                if (apply_wake_text_filter) {
+                    WakeAsrTextFilterResult filtered = filterWakeAsrText(text);
+                    if (filtered.drop) {
+                        std::cout << getTimestamp()
+                            << " [Wake] 丢弃唤醒词ASR: \"" << text << "\"\n";
+                        g_processing = false;
+                        std::cout << getTimestamp()
+                            << " [等待语音输入...]\n" << std::flush;
+                        continue;
+                    }
+                    if (filtered.changed) {
+                        std::cout << getTimestamp()
+                            << " [Wake] 过滤唤醒词ASR: \"" << text
+                            << "\" -> \"" << filtered.text << "\"\n";
+                        text = filtered.text;
+                    }
+                }
                 {
                     std::lock_guard<std::mutex> lock(g_process_thread_mutex);
                     if (g_process_thread && g_process_thread->joinable()) {
@@ -1021,6 +1209,7 @@ int main(int argc, char* argv[]) {
                         });
                 }
             } else {
+                wake_asr_filter_pending = false;
                 std::cout << getTimestamp() << " [ASR] 识别完成: (无结果)" << std::endl;
                 g_processing = false;
                 std::cout << getTimestamp() << " [等待语音输入...]\n" << std::flush;
@@ -1029,10 +1218,17 @@ int main(int argc, char* argv[]) {
     });
 
     // -------------------------------------------------------------------------
-    // 设置录音回调
+    // 录音回调只入队，避免在 PortAudio 回调线程里跑 VAD/DOA/重采样。
     // -------------------------------------------------------------------------
-    capture.SetCallback([&](const uint8_t* data, size_t size) {
-        if (!g_running) return;
+    std::deque<std::vector<uint8_t>> capture_queue;
+    std::mutex capture_queue_mutex;
+    std::condition_variable capture_queue_cv;
+    constexpr size_t kMaxCaptureQueueChunks = 80;
+    std::atomic<size_t> capture_queue_drops{0};
+    std::atomic<bool> audio_frontend_error_logged{false};
+
+    auto processCaptureChunk = [&](const uint8_t* data, size_t size) {
+        if (!g_running || data == nullptr || size == 0) return;
 
         // PCM16 little-endian -> float
         size_t num_samples = size / 2;
@@ -1075,13 +1271,41 @@ int main(int argc, char* argv[]) {
             long long drop_until = wake_drop_until_ms.load();
             if (drop_until > 0) {
                 long long now_ms = monotonicMs();
-                if (now_ms < drop_until) {
+                long long drop_start = wake_drop_start_ms.load();
+                long long elapsed_ms = drop_start > 0 ? now_ms - drop_start : 0;
+                bool loud_wake_audio = isLoudWakeAudio(samples_16k);
+                if ((drop_start > 0 && elapsed_ms < WAKE_HARD_DROP_MS) ||
+                        (loud_wake_audio && (now_ms < drop_until ||
+                            (drop_start > 0 && elapsed_ms < 1600)))) {
                     resetWakeInputState();
                     return;
                 }
                 wake_drop_until_ms.store(0);
+                wake_drop_start_ms.store(0);
+                resetWakeInputState();
+                wake_command_pending = true;
+                if (wake_ready_pending.exchange(false)) {
+                    std::cout << getTimestamp()
+                        << " [Wake] ready for command after "
+                        << elapsed_ms << "ms\n" << std::flush;
+                }
             }
         }
+
+#ifdef USE_AUDIO_FRONTEND
+        if (audio_frontend) {
+            std::vector<float> enhanced;
+            if (audio_frontend->ProcessChunk(samples_16k, &enhanced)) {
+                samples_16k = std::move(enhanced);
+                if (samples_16k.empty()) {
+                    return;
+                }
+            } else if (!audio_frontend_error_logged.exchange(true)) {
+                std::cerr << getTimestamp()
+                    << " [AudioFrontend] WebRTC处理失败，后续音频旁路\n";
+            }
+        }
+#endif
 
         // 录制音频（用于调试）
         if (cfg.save_audio) {
@@ -1111,7 +1335,11 @@ int main(int argc, char* argv[]) {
                         g_barge_in = true;
                         playWakeAck();
                         if (cfg.wake_drop_asr) {
-                            wake_drop_until_ms.store(monotonicMs() + wakeDropDurationMs());
+                            wake_ready_pending = true;
+                            wake_asr_filter_pending = true;
+                            long long now_ms = monotonicMs();
+                            wake_drop_start_ms.store(now_ms);
+                            wake_drop_until_ms.store(now_ms + wakeDropDurationMs());
                         }
 #ifdef USE_DOA
                         if (doa_runtime.enabled()) {
@@ -1221,10 +1449,11 @@ int main(int argc, char* argv[]) {
                     is_speaking = true;
                     audio_buffer.clear();
 
-                    for (const auto& frame : pre_buffer) {
-                        audio_buffer.insert(audio_buffer.end(), frame.begin(), frame.end());
+                    if (wake_command_pending.exchange(false)) {
+                        appendPreBuffer(POST_WAKE_PRE_BUFFER_FRAMES);
+                    } else {
+                        appendPreBuffer(PRE_BUFFER_FRAMES);
                     }
-                    pre_buffer.clear();
 
                     std::cout << "\n";
                 }
@@ -1272,11 +1501,61 @@ int main(int argc, char* argv[]) {
                 vad_progress.Publish(vad_prob, cfg.vad_threshold, 0, false);
             }
         }
+    };
+
+    std::thread capture_processing_thread([&]() {
+        while (true) {
+            std::vector<uint8_t> chunk;
+            {
+                std::unique_lock<std::mutex> lock(capture_queue_mutex);
+                capture_queue_cv.wait(lock, [&]() {
+                    return !g_running || !capture_queue.empty();
+                });
+                if (capture_queue.empty()) {
+                    if (!g_running) {
+                        break;
+                    }
+                    continue;
+                }
+                chunk = std::move(capture_queue.front());
+                capture_queue.pop_front();
+            }
+
+            size_t dropped = capture_queue_drops.exchange(0);
+            if (dropped > 0) {
+                std::cout << getTimestamp() << " [Audio] capture queue dropped "
+                    << dropped << " chunks\n";
+            }
+            processCaptureChunk(chunk.data(), chunk.size());
+        }
+    });
+
+    capture.SetCallback([&](const uint8_t* data, size_t size) {
+        if (!g_running || data == nullptr || size == 0) return;
+        std::vector<uint8_t> chunk(data, data + size);
+        {
+            std::lock_guard<std::mutex> lock(capture_queue_mutex);
+            if (capture_queue.size() >= kMaxCaptureQueueChunks) {
+                capture_queue.pop_front();
+                capture_queue_drops.fetch_add(1);
+            }
+            capture_queue.push_back(std::move(chunk));
+        }
+        capture_queue_cv.notify_one();
     });
 
     auto shutdownRuntime = [&](bool capture_started) {
         g_running = false;
         wake_listener.Stop();
+        clearPlayback();
+        if (capture_started) {
+            capture.Stop();
+            capture.Close();
+        }
+        capture_queue_cv.notify_all();
+        if (capture_processing_thread.joinable()) {
+            capture_processing_thread.join();
+        }
         vad_progress.Stop();
         recognition_cv.notify_all();
         playback_cv.notify_all();
@@ -1288,10 +1567,6 @@ int main(int argc, char* argv[]) {
             if (g_process_thread && g_process_thread->joinable()) {
                 g_process_thread->join();
             }
-        }
-        if (capture_started) {
-            capture.Stop();
-            capture.Close();
         }
         if (playback_thread.joinable()) {
             playback_thread.join();
@@ -1350,6 +1625,12 @@ int main(int argc, char* argv[]) {
             << " (" << recorded_audio.size() << " samples, "
             << (recorded_audio.size() / 16000.0f) << " 秒)\n";
         saveWav(cfg.audio_file, recorded_audio, 16000);
+    }
+    if (cfg.save_asr_audio && !asr_recorded_audio.empty()) {
+        std::cout << getTimestamp() << " [保存ASR音频] " << cfg.asr_audio_file
+            << " (" << asr_recorded_audio.size() << " samples, "
+            << (asr_recorded_audio.size() / 16000.0f) << " 秒)\n";
+        saveWav(cfg.asr_audio_file, asr_recorded_audio, 16000);
     }
     if (cfg.save_tts_audio && !tts_recorded_audio.empty()) {
         std::cout << getTimestamp() << " [保存TTS音频] " << cfg.tts_audio_file

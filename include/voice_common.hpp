@@ -58,7 +58,25 @@ struct AudioClip {
     int sample_rate = 0;
 };
 
+struct WakeAsrTextFilterResult {
+    std::string text;
+    bool changed = false;
+    bool drop = false;
+};
+
+struct AsrAudioPreprocessStats {
+    float input_rms = 0.0f;
+    float active_rms = 0.0f;
+    float input_peak = 0.0f;
+    float gain = 1.0f;
+    float output_peak = 0.0f;
+    size_t clipped_samples = 0;
+};
+
 std::vector<float> pcm16BytesToFloat(const std::vector<uint8_t>& bytes);
+std::vector<int16_t> floatToPcm16(const std::vector<float>& samples);
+WakeAsrTextFilterResult filterWakeAsrText(const std::string& text);
+AsrAudioPreprocessStats preprocessAsrAudio(std::vector<float>* samples);
 bool loadWavMonoFloat(const std::string& filename, AudioClip* clip, std::string* error);
 void saveWav(const std::string& filename, const std::vector<int16_t>& data, int sample_rate);
 

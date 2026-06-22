@@ -112,14 +112,51 @@ std::shared_ptr<SpacemiT::VadEngine> initVAD(float vad_threshold) {
     return vad;
 }
 
-std::shared_ptr<SpacemiT::AsrEngine> initASR() {
-    std::cout << getTimestamp() << " [3/5] 初始化 ASR..." << std::flush;
-    auto asr = std::make_shared<SpacemiT::AsrEngine>();
+std::shared_ptr<SpacemiT::AsrEngine> initASR(
+    const std::string& asr_engine,
+    const std::string& asr_endpoint,
+    const std::string& asr_model,
+    int asr_timeout) {
+    std::string engine = asr_engine.empty() ? "qwen3-asr" : asr_engine;
+    std::cout << getTimestamp() << " [3/5] 初始化 ASR (" << engine
+        << ")..." << std::flush;
+
+    SpacemiT::AsrConfig asr_config;
+    try {
+        asr_config = SpacemiT::AsrConfig::Preset(engine);
+    } catch (const std::exception& e) {
+        std::cerr << "\n" << getTimestamp() << " 错误: ASR 配置无效: "
+            << e.what() << "\n";
+        return nullptr;
+    }
+    asr_config.language = "auto";
+    asr_config.punctuation = true;
+    if (engine == "qwen3-asr") {
+        if (!asr_endpoint.empty()) {
+            asr_config.endpoint = asr_endpoint;
+        }
+        if (!asr_model.empty()) {
+            asr_config.model = asr_model;
+        }
+        if (asr_timeout > 0) {
+            asr_config.timeout = asr_timeout;
+        }
+        std::cout << " endpoint=" << asr_config.endpoint
+            << " model=" << asr_config.model;
+    }
+
+    auto asr = std::make_shared<SpacemiT::AsrEngine>(asr_config);
     if (!asr->IsInitialized()) {
         std::cerr << "\n" << getTimestamp() << " 错误: ASR 初始化失败\n";
         return nullptr;
     }
     std::cout << " OK\n";
+
+    if (engine == "qwen3-asr") {
+        std::cout << getTimestamp()
+            << " [3/5] ASR 预热... SKIP (qwen3-asr external server)\n";
+        return asr;
+    }
 
     std::cout << getTimestamp() << " [3/5] ASR 预热..." << std::flush;
     try {
