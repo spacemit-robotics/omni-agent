@@ -733,6 +733,7 @@ int main(int argc, char* argv[]) {
     const size_t PRE_BUFFER_FRAMES = 20;
     const size_t POST_WAKE_PRE_BUFFER_FRAMES = 6;
     const long long WAKE_HARD_DROP_MS = 120;
+    const long long WAKE_EVENT_TTL_MS = 1500;
     std::deque<std::vector<float>> pre_buffer;
 
     int barge_in_confirm_frames = 0;
@@ -742,7 +743,7 @@ int main(int argc, char* argv[]) {
     const int COOLDOWN_FRAMES = 15;
 
     std::atomic<bool> barge_in_recording{false};
-    std::atomic<bool> wake_barge_in_requested{false};
+    std::atomic<long long> wake_barge_in_request_ms{0};
     std::atomic<long long> wake_drop_until_ms{0};
     std::atomic<long long> wake_drop_start_ms{0};
     std::atomic<bool> wake_ready_pending{false};
@@ -807,6 +808,15 @@ int main(int argc, char* argv[]) {
     auto monotonicMs = []() -> long long {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+
+    auto consumeWakeRequest = [&]() -> bool {
+        long long wake_ms = wake_barge_in_request_ms.exchange(0);
+        if (wake_ms <= 0) {
+            return false;
+        }
+        long long age_ms = monotonicMs() - wake_ms;
+        return age_ms >= 0 && age_ms <= WAKE_EVENT_TTL_MS;
     };
 
     auto wakeDropDurationMs = [&]() -> int {
@@ -927,7 +937,7 @@ int main(int argc, char* argv[]) {
             float vad_prob = vad_result ? vad_result->GetProbability() : 0.0f;
 
             if (g_processing) {
-                if (cfg.wake_enabled && wake_barge_in_requested.exchange(false)) {
+                if (cfg.wake_enabled && consumeWakeRequest()) {
                     if (cfg.wake_interrupt_mode) {
                         std::cout << "\n" << getTimestamp()
                             << " [Wake] HID唤醒，中断TTS并播放提示音\n";
@@ -1039,10 +1049,6 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 continue;
-            }
-
-            if (cfg.wake_enabled) {
-                wake_barge_in_requested = false;
             }
 
             std::lock_guard<std::mutex> lock(buffer_mutex);
@@ -1272,9 +1278,7 @@ int main(int argc, char* argv[]) {
     if (cfg.wake_enabled) {
         std::string wake_error;
         if (!wake_listener.Start(cfg.wake_device, [&]() {
-                if (g_processing) {
-                    wake_barge_in_requested = true;
-                }
+                wake_barge_in_request_ms.store(monotonicMs());
             }, &wake_error)) {
             std::cerr << getTimestamp() << " 错误: 无法启动 HID 唤醒: "
                 << wake_error << "\n";

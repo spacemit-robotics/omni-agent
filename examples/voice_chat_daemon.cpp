@@ -424,10 +424,10 @@ bool ResolveDevice(const char* kind,
 // -----------------------------------------------------------------------------
 
 struct PidRecord {
-    pid_t daemon_pid = 0;
-    pid_t llama_pid = 0;
-    pid_t asr_pid = 0;
-    pid_t voice_pid = 0;
+    pid_t daemon_pid = -1;
+    pid_t llama_pid = -1;
+    pid_t asr_pid = -1;
+    pid_t voice_pid = -1;
     std::string mode;
     std::string log_path;
 };
@@ -477,6 +477,13 @@ bool WritePidFile(const std::string& path, const PidRecord& rec) {
     f << "mode=" << rec.mode << "\n";
     f << "log=" << rec.log_path << "\n";
     return true;
+}
+
+std::string FormatPidStatus(pid_t pid) {
+    if (pid <= 0) {
+        return "-";
+    }
+    return std::to_string(pid) + (ProcessAlive(pid) ? "" : " (DEAD)");
 }
 
 void WriteStartupStatus(int fd, char status) {
@@ -1933,13 +1940,10 @@ int CmdStatus() {
         return 1;
     }
     std::cout << "voice_chat_daemon: running\n";
-    std::cout << "  daemon pid: " << rec.daemon_pid << "\n";
-    std::cout << "  llama  pid: " << rec.llama_pid
-        << (ProcessAlive(rec.llama_pid) ? "" : " (DEAD)") << "\n";
-    std::cout << "  asr    pid: " << rec.asr_pid
-        << (ProcessAlive(rec.asr_pid) ? "" : " (DEAD)") << "\n";
-    std::cout << "  voice  pid: " << rec.voice_pid
-        << (ProcessAlive(rec.voice_pid) ? "" : " (DEAD)") << "\n";
+    std::cout << "  daemon pid: " << FormatPidStatus(rec.daemon_pid) << "\n";
+    std::cout << "  llama  pid: " << FormatPidStatus(rec.llama_pid) << "\n";
+    std::cout << "  asr    pid: " << FormatPidStatus(rec.asr_pid) << "\n";
+    std::cout << "  voice  pid: " << FormatPidStatus(rec.voice_pid) << "\n";
     std::cout << "  mode:       " << rec.mode << "\n";
     std::cout << "  log:        " << rec.log_path << "\n";
     return 0;

@@ -6,13 +6,12 @@
 #include "hid_wake_listener.hpp"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <unistd.h>
 
 #include <cerrno>
-#include <chrono>
 #include <cstring>
 #include <utility>
-#include <thread>
 
 namespace omni_agent {
 namespace {
@@ -61,10 +60,33 @@ void HidWakeListener::Stop() {
 void HidWakeListener::Run(int fd) {
     unsigned char buf[64];
     while (running_) {
+        struct pollfd pfd {};
+        pfd.fd = fd;
+        pfd.events = POLLIN | POLLPRI;
+
+        int ready = poll(&pfd, 1, 100);
+        if (!running_) {
+            break;
+        }
+        if (ready < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            break;
+        }
+        if (ready == 0) {
+            continue;
+        }
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            break;
+        }
+        if (!(pfd.revents & (POLLIN | POLLPRI))) {
+            continue;
+        }
+
         ssize_t n = read(fd, buf, sizeof(buf));
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 continue;
             }
             if (errno == EINTR) {
@@ -73,7 +95,6 @@ void HidWakeListener::Run(int fd) {
             break;
         }
         if (n == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
             continue;
         }
         if (n >= static_cast<ssize_t>(sizeof(kWakeReport)) &&
