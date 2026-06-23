@@ -22,6 +22,7 @@
 #include <mutex>
 #include <thread>
 #include <chrono>
+#include <cstdint>
 #include <csignal>
 #include <cstring>
 #include <iomanip>
@@ -1257,15 +1258,37 @@ int main(int argc, char* argv[]) {
     // -------------------------------------------------------------------------
     // 录音回调只入队，避免在 PortAudio 回调线程里跑 VAD/DOA/重采样。
     // -------------------------------------------------------------------------
-    std::deque<std::vector<uint8_t>> capture_queue;
+    struct CaptureChunk {
+        std::vector<uint8_t> bytes;
+        uint64_t generation = 0;
+    };
+
+    std::deque<CaptureChunk> capture_queue;
     std::mutex capture_queue_mutex;
     std::condition_variable capture_queue_cv;
     constexpr size_t kMaxCaptureQueueChunks = 80;
     std::atomic<size_t> capture_queue_drops{0};
+    std::atomic<uint64_t> capture_queue_generation{0};
     std::atomic<bool> audio_frontend_error_logged{false};
 
-    auto processCaptureChunk = [&](const uint8_t* data, size_t size) {
+    auto isCurrentCaptureGeneration = [&](uint64_t generation) {
+        return generation == capture_queue_generation.load(std::memory_order_acquire);
+    };
+
+    auto flushPendingCapture = [&]() {
+        capture_queue_generation.fetch_add(1, std::memory_order_acq_rel);
+        {
+            std::lock_guard<std::mutex> lock(capture_queue_mutex);
+            capture_queue.clear();
+        }
+        capture_queue_drops.store(0);
+        capture_queue_cv.notify_all();
+    };
+    pipeline_ctx.flush_pending_capture = flushPendingCapture;
+
+    auto processCaptureChunk = [&](const uint8_t* data, size_t size, uint64_t generation) {
         if (!g_running || data == nullptr || size == 0) return;
+        if (!isCurrentCaptureGeneration(generation)) return;
 
         // PCM16 little-endian -> float
         size_t num_samples = size / 2;
@@ -1303,6 +1326,7 @@ int main(int argc, char* argv[]) {
         }
 
         if (samples_16k.empty()) return;
+        if (!isCurrentCaptureGeneration(generation)) return;
 
         if (cfg.wake_enabled && cfg.wake_interrupt_mode && cfg.wake_drop_asr) {
             long long drop_until = wake_drop_until_ms.load();
@@ -1344,6 +1368,8 @@ int main(int argc, char* argv[]) {
         }
 #endif
 
+        if (!isCurrentCaptureGeneration(generation)) return;
+
         // 录制音频（用于调试）
         if (cfg.save_audio) {
             std::lock_guard<std::mutex> lock(record_mutex);
@@ -1360,6 +1386,8 @@ int main(int argc, char* argv[]) {
         }
 
         while (g_running) {
+            if (!isCurrentCaptureGeneration(generation)) return;
+
             std::vector<float> vad_frame;
             float vad_prob = 0.0f;
 
@@ -1554,7 +1582,7 @@ int main(int argc, char* argv[]) {
 
     std::thread capture_processing_thread([&]() {
         while (true) {
-            std::vector<uint8_t> chunk;
+            CaptureChunk chunk;
             {
                 std::unique_lock<std::mutex> lock(capture_queue_mutex);
                 capture_queue_cv.wait(lock, [&]() {
@@ -1570,18 +1598,23 @@ int main(int argc, char* argv[]) {
                 capture_queue.pop_front();
             }
 
+            if (!isCurrentCaptureGeneration(chunk.generation)) {
+                continue;
+            }
             size_t dropped = capture_queue_drops.exchange(0);
             if (dropped > 0) {
                 std::cout << getTimestamp() << " [Audio] capture queue dropped "
                     << dropped << " chunks\n";
             }
-            processCaptureChunk(chunk.data(), chunk.size());
+            processCaptureChunk(chunk.bytes.data(), chunk.bytes.size(), chunk.generation);
         }
     });
 
     capture.SetCallback([&](const uint8_t* data, size_t size) {
         if (!g_running || data == nullptr || size == 0) return;
-        std::vector<uint8_t> chunk(data, data + size);
+        CaptureChunk chunk;
+        chunk.bytes.assign(data, data + size);
+        chunk.generation = capture_queue_generation.load(std::memory_order_acquire);
         {
             std::lock_guard<std::mutex> lock(capture_queue_mutex);
             if (capture_queue.size() >= kMaxCaptureQueueChunks) {

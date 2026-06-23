@@ -18,6 +18,9 @@
   <system_depend check="pkg-config --exists libcurl">libcurl4-openssl-dev</system_depend>
   <system_depend check="test -f /usr/include/nlohmann/json.hpp || pkg-config --exists nlohmann_json">nlohmann-json3-dev</system_depend>
   <system_depend>llama.cpp-tools-spacemit</system_depend>
+  <!-- Required only when mm passes -DUSE_AEC=ON or -DUSE_AUDIO_FRONTEND=ON. -->
+  <system_depend check="case ${SROBOTIS_CMAKE_EXTRA_ARGS:-} in *USE_AEC=ON*|*USE_AEC=TRUE*|*USE_AEC=1*|*USE_AUDIO_FRONTEND=ON*|*USE_AUDIO_FRONTEND=TRUE*|*USE_AUDIO_FRONTEND=1*) command -v meson >/dev/null ;; *) true ;; esac">meson</system_depend>
+  <system_depend check="case ${SROBOTIS_CMAKE_EXTRA_ARGS:-} in *USE_AEC=ON*|*USE_AEC=TRUE*|*USE_AEC=1*|*USE_AUDIO_FRONTEND=ON*|*USE_AUDIO_FRONTEND=TRUE*|*USE_AUDIO_FRONTEND=1*) command -v ninja >/dev/null ;; *) true ;; esac">ninja-build</system_depend>
 
   <export>
     <build_type>cmake</build_type>

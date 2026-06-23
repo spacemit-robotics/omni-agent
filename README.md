@@ -191,13 +191,20 @@ cd application/native/omni_agent && mm
 
 # 需要软件 AEC 时
 cd application/native/omni_agent && mm -DUSE_AEC=ON
+
+# 需要 voice_chat 的 WebRTC AGC/NS/HPF 前端时
+cd application/native/omni_agent && mm -DUSE_AUDIO_FRONTEND=ON
 ```
 
 | CMake 选项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `USE_MCP` | `ON` | MCP 工具调用支持 |
 | `USE_AEC` | `OFF` | 编译 `voice_chat_aec` |
+| `USE_AUDIO_FRONTEND` | `OFF` | 为 `voice_chat` 编译 WebRTC AGC/NS/HPF |
 | `USE_VP` | `ON` | 声纹验证支持 |
+
+`USE_AEC=ON` 或 `USE_AUDIO_FRONTEND=ON` 会拉取并构建
+`webrtc-audio-processing`，需要系统已安装 `meson` 和 `ninja-build`。
 
 ## 附录：底层调试工具
 

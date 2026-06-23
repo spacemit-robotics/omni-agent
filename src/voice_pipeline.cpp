@@ -137,6 +137,18 @@ void resetVadState(VoicePipelineContext& ctx) {
     ctx.vad->Reset();
 }
 
+void resetInputState(VoicePipelineContext& ctx) {
+    {
+        std::lock_guard<std::mutex> lock(*ctx.buffer_mutex);
+        ctx.audio_buffer->clear();
+        ctx.pre_buffer->clear();
+        *ctx.silence_frames = 0;
+        *ctx.is_speaking = false;
+    }
+    *ctx.barge_in_recording = false;
+    resetVadState(ctx);
+}
+
 }  // namespace
 
 void playStartupGreeting(VoicePipelineContext& ctx, const std::string& greeting) {
@@ -174,15 +186,7 @@ void playStartupGreeting(VoicePipelineContext& ctx, const std::string& greeting)
         std::cerr << getTimestamp() << " [TTS] 启动问候合成失败\n";
     }
 
-    {
-        std::lock_guard<std::mutex> lock(*ctx.buffer_mutex);
-        ctx.audio_buffer->clear();
-        ctx.pre_buffer->clear();
-        *ctx.silence_frames = 0;
-        *ctx.is_speaking = false;
-    }
-    *ctx.barge_in_recording = false;
-    resetVadState(ctx);
+    resetInputState(ctx);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     g_barge_in = false;
@@ -438,16 +442,12 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
 
     // Clean up buffers
     if (!g_barge_in) {
-        {
-            std::lock_guard<std::mutex> lock(*ctx.buffer_mutex);
-            ctx.audio_buffer->clear();
-            ctx.pre_buffer->clear();
-            *ctx.silence_frames = 0;
-            *ctx.is_speaking = false;
-        }
-        *ctx.barge_in_recording = false;
-        resetVadState(ctx);
+        resetInputState(ctx);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (ctx.flush_pending_capture) {
+            ctx.flush_pending_capture();
+        }
+        resetInputState(ctx);
         std::cout << getTimestamp() << " [TTS] 播放完成，缓冲区已清理\n";
     } else {
         std::cout << getTimestamp() << " [TTS] Barge-in 打断，保留音频缓冲区\n";
