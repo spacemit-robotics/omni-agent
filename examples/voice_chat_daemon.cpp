@@ -93,6 +93,36 @@ private:
     FILE* null_stream_ = nullptr;
 };
 
+class CurlGlobalRuntime {
+public:
+    CurlGlobalRuntime() = default;
+
+    bool Init(std::string* error) {
+        CURLcode rc = curl_global_init(CURL_GLOBAL_DEFAULT);
+        if (rc != CURLE_OK) {
+            if (error) {
+                *error = std::string("curl_global_init failed: ")
+                    + curl_easy_strerror(rc);
+            }
+            return false;
+        }
+        initialized_ = true;
+        return true;
+    }
+
+    ~CurlGlobalRuntime() {
+        if (initialized_) {
+            curl_global_cleanup();
+        }
+    }
+
+    CurlGlobalRuntime(const CurlGlobalRuntime&) = delete;
+    CurlGlobalRuntime& operator=(const CurlGlobalRuntime&) = delete;
+
+private:
+    bool initialized_ = false;
+};
+
 std::string Timestamp() {
     char buf[64];
     std::time_t t = std::time(nullptr);
@@ -158,13 +188,6 @@ bool DownloadFile(const std::string& url, const std::string& path,
         if (error) {
             *error = tmp_path + ": " + std::strerror(errno);
         }
-        return false;
-    }
-
-    if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
-        std::fclose(out);
-        std::remove(tmp_path.c_str());
-        if (error) *error = "curl_global_init failed";
         return false;
     }
 
@@ -1850,6 +1873,19 @@ int CmdStart(int argc, char** argv) {
     }
     std::cerr << "[info] " << cfg.mode << " started, pid=" << voice_pid << "\n";
 
+    auto stop_started_children = [&]() {
+        if (voice_pid > 0) {
+            kill(voice_pid, SIGTERM);
+        }
+        if (asr_pid > 0) {
+            kill(asr_pid, SIGTERM);
+        }
+        if (llama_pid > 0) {
+            kill(llama_pid, SIGTERM);
+        }
+        stop_mcp_if_started();
+    };
+
     // 11. 写 PID 文件
     PidRecord rec;
     rec.daemon_pid = getpid();
@@ -1861,16 +1897,42 @@ int CmdStart(int argc, char** argv) {
     if (!WritePidFile(pid_file, rec)) {
         std::cerr << "错误: 写 PID 文件失败 " << pid_file << "\n";
         WriteStartupStatus(startup_pipe[1], '0');
-        if (voice_pid > 0) {
-            kill(voice_pid, SIGTERM);
+        stop_started_children();
+        return 1;
+    }
+
+    int voice_start_status = 0;
+    bool voice_exited_during_startup = false;
+    for (int i = 0; i < 10; ++i) {
+        pid_t dead = waitpid(voice_pid, &voice_start_status, WNOHANG);
+        if (dead == 0) {
+            usleep(100 * 1000);
+            continue;
         }
-        if (asr_pid > 0) {
-            kill(asr_pid, SIGTERM);
+        if (dead == voice_pid) {
+            voice_exited_during_startup = true;
+            voice_pid = -1;
+            break;
         }
-        if (llama_pid > 0) {
-            kill(llama_pid, SIGTERM);
+        if (dead < 0) {
+            if (errno == EINTR) {
+                --i;
+                continue;
+            }
+            if (errno == ECHILD) {
+                voice_exited_during_startup = true;
+                voice_pid = -1;
+            }
+            break;
         }
-        stop_mcp_if_started();
+    }
+    if (voice_exited_during_startup) {
+        std::cerr << "错误: " << cfg.mode << " 启动后立即退出"
+            << " (status=" << voice_start_status << ")\n";
+        std::cerr << "      完整错误见 log: " << log_path << "\n";
+        WriteStartupStatus(startup_pipe[1], '0');
+        stop_started_children();
+        unlink(pid_file.c_str());
         return 1;
     }
     WriteStartupStatus(startup_pipe[1], '1');
@@ -2166,6 +2228,13 @@ void PrintUsage(const char* prog) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    CurlGlobalRuntime curl_runtime;
+    std::string curl_error;
+    if (!curl_runtime.Init(&curl_error)) {
+        std::cerr << "错误: " << curl_error << "\n";
+        return 1;
+    }
+
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--register-speaker") == 0) {
             if (i + 1 >= argc) {
