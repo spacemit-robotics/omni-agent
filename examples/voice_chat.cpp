@@ -824,6 +824,8 @@ int main(int argc, char* argv[]) {
         }
     });
 
+    std::mutex playback_enqueue_mutex;
+
     auto resampleForPlayback = [&](const std::vector<float>& float_samples, int src_rate) {
         if (float_samples.empty()) {
             return std::vector<float>{};
@@ -854,6 +856,7 @@ int main(int argc, char* argv[]) {
 
     // 入队播放数据：float mono -> resample -> expand channels -> PCM16 bytes -> enqueue
     auto enqueuePlayback = [&](const std::vector<float>& float_samples, int src_rate) {
+        std::lock_guard<std::mutex> enqueue_lock(playback_enqueue_mutex);
         std::vector<float> resampled = resampleForPlayback(float_samples, src_rate);
         if (resampled.empty()) {
             return;
@@ -910,6 +913,7 @@ int main(int argc, char* argv[]) {
     };
 
     auto clearPlayback = [&]() {
+        std::lock_guard<std::mutex> enqueue_lock(playback_enqueue_mutex);
         {
             std::lock_guard<std::mutex> lock(playback_mutex);
             std::queue<std::vector<uint8_t>> empty;
@@ -1267,8 +1271,10 @@ int main(int argc, char* argv[]) {
     std::mutex capture_queue_mutex;
     std::condition_variable capture_queue_cv;
     constexpr size_t kMaxCaptureQueueChunks = 80;
+    constexpr long long kPostFlushCaptureIgnoreMs = 250;
     std::atomic<size_t> capture_queue_drops{0};
     std::atomic<uint64_t> capture_queue_generation{0};
+    std::atomic<long long> capture_ignore_until_ms{0};
     std::atomic<bool> audio_frontend_error_logged{false};
 
     auto isCurrentCaptureGeneration = [&](uint64_t generation) {
@@ -1277,6 +1283,8 @@ int main(int argc, char* argv[]) {
 
     auto flushPendingCapture = [&]() {
         capture_queue_generation.fetch_add(1, std::memory_order_acq_rel);
+        capture_ignore_until_ms.store(
+            monotonicMs() + kPostFlushCaptureIgnoreMs, std::memory_order_release);
         {
             std::lock_guard<std::mutex> lock(capture_queue_mutex);
             capture_queue.clear();
@@ -1411,8 +1419,8 @@ int main(int argc, char* argv[]) {
                     if (cfg.wake_interrupt_mode) {
                         std::cout << "\n" << getTimestamp()
                             << " [Wake] HID唤醒，中断TTS并播放提示音\n";
-                        clearPlayback();
                         g_barge_in = true;
+                        clearPlayback();
                         playWakeAck();
                         if (cfg.wake_drop_asr) {
                             wake_ready_pending = true;
@@ -1433,13 +1441,13 @@ int main(int argc, char* argv[]) {
 
                     std::cout << "\n" << getTimestamp()
                         << " [Wake] HID唤醒，停止播放\n";
+                    g_barge_in = true;
                     clearPlayback();
 #ifdef USE_DOA
                     if (doa_runtime.enabled()) {
                         doa_runtime.Reset();
                     }
 #endif
-                    g_barge_in = true;
                     barge_in_recording = true;
                     barge_in_confirm_frames = 0;
 
@@ -1482,13 +1490,13 @@ int main(int argc, char* argv[]) {
                         std::cout << "\n" << getTimestamp() << " [Barge-in] 用户打断 (连续"
                             << barge_in_confirm_frames << "帧, prob=" << vad_prob
                             << ")，停止播放\n";
+                        g_barge_in = true;
                         clearPlayback();
 #ifdef USE_DOA
                         if (doa_runtime.enabled()) {
                             doa_runtime.Reset();
                         }
 #endif
-                        g_barge_in = true;
                         barge_in_recording = true;
                         barge_in_confirm_frames = 0;
 
@@ -1612,6 +1620,15 @@ int main(int argc, char* argv[]) {
 
     capture.SetCallback([&](const uint8_t* data, size_t size) {
         if (!g_running || data == nullptr || size == 0) return;
+        long long ignore_until_ms = capture_ignore_until_ms.load(std::memory_order_acquire);
+        if (ignore_until_ms > 0) {
+            long long now_ms = monotonicMs();
+            if (now_ms < ignore_until_ms) {
+                return;
+            }
+            capture_ignore_until_ms.compare_exchange_strong(
+                ignore_until_ms, 0, std::memory_order_acq_rel);
+        }
         CaptureChunk chunk;
         chunk.bytes.assign(data, data + size);
         chunk.generation = capture_queue_generation.load(std::memory_order_acquire);
