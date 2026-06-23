@@ -9,7 +9,7 @@
   <depend>tts</depend>
   <depend>vad</depend>
   <depend>llm</depend>
-  <!-- webrtc-audio-processing: fetched at configure/build when USE_AEC -->
+  <!-- webrtc-audio-processing: fetched when USE_AEC or USE_AUDIO_FRONTEND is enabled. -->
   <depend>mcp</depend>
   <depend>voiceprint</depend>
   <system_depend check="pkg-config --exists portaudio-2.0">portaudio19-dev</system_depend>
@@ -18,8 +18,6 @@
   <system_depend check="pkg-config --exists libcurl">libcurl4-openssl-dev</system_depend>
   <system_depend check="test -f /usr/include/nlohmann/json.hpp || pkg-config --exists nlohmann_json">nlohmann-json3-dev</system_depend>
   <system_depend>llama.cpp-tools-spacemit</system_depend>
-  <system_depend check="meson --version">meson</system_depend>
-  <system_depend check="ninja --version">ninja-build</system_depend>
 
   <export>
     <build_type>cmake</build_type>

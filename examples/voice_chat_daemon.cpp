@@ -26,6 +26,7 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -35,6 +36,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -673,7 +675,24 @@ bool EnsureWakeAckAudio(const DaemonConfig& cfg) {
     return true;
 }
 
-bool HttpHealthOk(const std::string& host, int port) {
+bool SetSocketTimeout(int fd, int timeout_ms) {
+    if (timeout_ms <= 0) {
+        timeout_ms = 1;
+    }
+    struct timeval tv {};
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 &&
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0;
+}
+
+int64_t MonotonicMs() {
+    struct timespec ts {};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+}
+
+bool HttpHealthOk(const std::string& host, int port, int timeout_ms) {
     struct addrinfo hints {};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -689,6 +708,10 @@ bool HttpHealthOk(const std::string& host, int port) {
     for (struct addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
         int s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (s < 0) {
+            continue;
+        }
+        if (!SetSocketTimeout(s, timeout_ms)) {
+            close(s);
             continue;
         }
         if (connect(s, rp->ai_addr, rp->ai_addrlen) != 0) {
@@ -731,8 +754,11 @@ bool WaitHttpHealthReady(const std::string& host, int port, int timeout_sec) {
     if (timeout_sec <= 0) {
         timeout_sec = 1;
     }
-    for (int i = 0; i < timeout_sec * 4; ++i) {
-        if (HttpHealthOk(host, port)) {
+    const int64_t deadline_ms = MonotonicMs() + static_cast<int64_t>(timeout_sec) * 1000;
+    while (MonotonicMs() < deadline_ms) {
+        int64_t remaining_ms = deadline_ms - MonotonicMs();
+        int probe_timeout_ms = static_cast<int>(std::min<int64_t>(remaining_ms, 500));
+        if (HttpHealthOk(host, port, probe_timeout_ms)) {
             return true;
         }
         usleep(250 * 1000);

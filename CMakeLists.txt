@@ -89,7 +89,7 @@ endif()
 # Options
 option(USE_MCP "Enable MCP (Model Context Protocol) support" ON)
 option(USE_AEC "Enable WebRTC AEC (Acoustic Echo Cancellation) for barge-in support" OFF)
-option(USE_AUDIO_FRONTEND "Enable WebRTC audio frontend (AGC/NS/HPF) for voice_chat" ON)
+option(USE_AUDIO_FRONTEND "Enable WebRTC audio frontend (AGC/NS/HPF) for voice_chat" OFF)
 option(USE_VP "Enable Voiceprint (speaker identification) support" ON)
 option(USE_DOA "Enable DOA (Direction of Arrival) support" ON)
 
