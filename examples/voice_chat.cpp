@@ -73,7 +73,7 @@ struct Config {
     bool wake_enabled = false;
     std::string wake_device = "/dev/hidraw0";
     bool wake_interrupt_mode = true;
-    std::string wake_ack_audio = "/root/.cache/models/assets/audio/006_im_here.wav";
+    std::string wake_ack_audio = "~/.cache/models/assets/audio/006_im_here.wav";
     bool wake_drop_asr = true;
     int wake_drop_audio_ms = 500;
     int wake_post_ack_tail_ms = 0;
@@ -533,6 +533,7 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signalHandler);
 
     Config cfg = parseArgs(argc, argv);
+    cfg.wake_ack_audio = expandUserPath(cfg.wake_ack_audio);
 
     if (cfg.list_devices) {
         listAudioDevices();

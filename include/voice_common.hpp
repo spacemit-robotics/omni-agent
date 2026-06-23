@@ -75,6 +75,7 @@ struct AsrAudioPreprocessStats {
 
 std::vector<float> pcm16BytesToFloat(const std::vector<uint8_t>& bytes);
 std::vector<int16_t> floatToPcm16(const std::vector<float>& samples);
+std::string expandUserPath(const std::string& path);
 WakeAsrTextFilterResult filterWakeAsrText(const std::string& text);
 AsrAudioPreprocessStats preprocessAsrAudio(std::vector<float>* samples);
 bool loadWavMonoFloat(const std::string& filename, AudioClip* clip, std::string* error);

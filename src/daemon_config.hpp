@@ -98,7 +98,7 @@ struct WakeCfg {
     // TTS 播放中收到唤醒时只中断并播放提示音，不把唤醒词送入 ASR/LLM。
     bool interrupt_mode = true;
     // 唤醒打断后播放的提示音。
-    std::string ack_audio = "/root/.cache/models/assets/audio/006_im_here.wav";
+    std::string ack_audio = "~/.cache/models/assets/audio/006_im_here.wav";
     // 默认唤醒提示音缺失时的下载地址；空字符串表示不自动下载。
     std::string ack_audio_url =
         "https://archive.spacemit.com/spacemit-ai/model_zoo/assets/audio/006_im_here.wav";

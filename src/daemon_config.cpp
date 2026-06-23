@@ -88,7 +88,7 @@ const char* kVoiceChatConfigTemplate = R"({
         "enabled": false,
         "device": "/dev/hidraw0",
         "interrupt_mode": true,
-        "ack_audio": "/root/.cache/models/assets/audio/006_im_here.wav",
+        "ack_audio": "~/.cache/models/assets/audio/006_im_here.wav",
         "ack_audio_url": "https://archive.spacemit.com/spacemit-ai/model_zoo/assets/audio/006_im_here.wav",
         "drop_wake_asr": true,
         "drop_audio_ms": 500,
@@ -460,6 +460,9 @@ bool LoadJson(const std::string& path, LoadStatus& status, json& out) {
 }
 
 void ExpandPathFields(DaemonConfig& cfg) {
+    if (cfg.wake.ack_audio == "/root/.cache/models/assets/audio/006_im_here.wav") {
+        cfg.wake.ack_audio = "~/.cache/models/assets/audio/006_im_here.wav";
+    }
     cfg.debug.save_audio_file = ExpandUser(cfg.debug.save_audio_file);
     cfg.debug.save_asr_audio_file = ExpandUser(cfg.debug.save_asr_audio_file);
     cfg.debug.save_tts_audio_file = ExpandUser(cfg.debug.save_tts_audio_file);

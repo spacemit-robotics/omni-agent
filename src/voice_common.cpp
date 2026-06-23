@@ -28,6 +28,15 @@ bool startsWith(const std::string& text, const std::string& prefix) {
     return text.rfind(prefix, 0) == 0;
 }
 
+std::string homeDir() {
+    if (const char* home = std::getenv("HOME")) {
+        if (home[0] != '\0') {
+            return home;
+        }
+    }
+    return ".";
+}
+
 void trimWakeSeparators(std::string* text) {
     static const std::vector<std::string> kSeparators = {
         " ", "\t", "\n", "\r",
@@ -416,6 +425,21 @@ AsrAudioPreprocessStats preprocessAsrAudio(std::vector<float>* samples) {
     }
     stats.output_peak = output_peak;
     return stats;
+}
+
+std::string expandUserPath(const std::string& path) {
+    if (path.empty()) {
+        return path;
+    }
+    if (path[0] == '~' && (path.size() == 1 || path[1] == '/')) {
+        return homeDir() + path.substr(1);
+    }
+    const std::string home_var = "$HOME";
+    if (path.compare(0, home_var.size(), home_var) == 0 &&
+            (path.size() == home_var.size() || path[home_var.size()] == '/')) {
+        return homeDir() + path.substr(home_var.size());
+    }
+    return path;
 }
 
 bool loadWavMonoFloat(const std::string& filename, AudioClip* clip, std::string* error) {
