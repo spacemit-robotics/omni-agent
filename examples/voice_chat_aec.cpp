@@ -758,6 +758,7 @@ int main(int argc, char* argv[]) {
 
     const size_t VAD_FRAME_SIZE = 512;
     std::vector<float> vad_frame_buffer;
+    std::mutex vad_state_mutex;
     VadProgressPrinter vad_progress;
     vad_progress.Start();
     omni_agent::HidWakeListener wake_listener;
@@ -795,6 +796,7 @@ int main(int argc, char* argv[]) {
     pipeline_ctx.is_speaking = &is_speaking;
     pipeline_ctx.barge_in_recording = &barge_in_recording;
     pipeline_ctx.vad_frame_buffer = &vad_frame_buffer;
+    pipeline_ctx.vad_state_mutex = &vad_state_mutex;
     pipeline_ctx.pre_buffer = &pre_buffer;
 #ifdef USE_MCP
     pipeline_ctx.mcp_manager = mcp.manager.get();
@@ -867,8 +869,11 @@ int main(int argc, char* argv[]) {
         }
         barge_in_recording = false;
         post_barge_in_cooldown = 0;
-        vad_frame_buffer.clear();
-        vad->Reset();
+        {
+            std::lock_guard<std::mutex> lock(vad_state_mutex);
+            vad_frame_buffer.clear();
+            vad->Reset();
+        }
     };
 
     auto playWakeAck = [&]() {
@@ -927,14 +932,29 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        vad_frame_buffer.insert(vad_frame_buffer.end(), samples_16k.begin(), samples_16k.end());
+        {
+            std::lock_guard<std::mutex> lock(vad_state_mutex);
+            vad_frame_buffer.insert(vad_frame_buffer.end(),
+                samples_16k.begin(), samples_16k.end());
+        }
 
-        while (vad_frame_buffer.size() >= VAD_FRAME_SIZE && g_running) {
-            std::vector<float> vad_frame(vad_frame_buffer.begin(), vad_frame_buffer.begin() + VAD_FRAME_SIZE);
-            vad_frame_buffer.erase(vad_frame_buffer.begin(), vad_frame_buffer.begin() + VAD_FRAME_SIZE);
+        while (g_running) {
+            std::vector<float> vad_frame;
+            float vad_prob = 0.0f;
 
-            auto vad_result = vad->Detect(vad_frame);
-            float vad_prob = vad_result ? vad_result->GetProbability() : 0.0f;
+            {
+                std::lock_guard<std::mutex> lock(vad_state_mutex);
+                if (vad_frame_buffer.size() < VAD_FRAME_SIZE) {
+                    break;
+                }
+                vad_frame.assign(vad_frame_buffer.begin(),
+                    vad_frame_buffer.begin() + VAD_FRAME_SIZE);
+                vad_frame_buffer.erase(vad_frame_buffer.begin(),
+                    vad_frame_buffer.begin() + VAD_FRAME_SIZE);
+
+                auto vad_result = vad->Detect(vad_frame);
+                vad_prob = vad_result ? vad_result->GetProbability() : 0.0f;
+            }
 
             if (g_processing) {
                 if (cfg.wake_enabled && consumeWakeRequest()) {
@@ -1104,6 +1124,7 @@ int main(int argc, char* argv[]) {
                     std::cout << std::endl;
 
                     if (audio_buffer.size() > 8000) {
+                        wake_barge_in_request_ms.store(0);
 #ifdef USE_VP
                         std::string speaker_tag;
                         bool vp_passed = true;
@@ -1278,7 +1299,9 @@ int main(int argc, char* argv[]) {
     if (cfg.wake_enabled) {
         std::string wake_error;
         if (!wake_listener.Start(cfg.wake_device, [&]() {
-                wake_barge_in_request_ms.store(monotonicMs());
+                if (g_processing) {
+                    wake_barge_in_request_ms.store(monotonicMs());
+                }
             }, &wake_error)) {
             std::cerr << getTimestamp() << " 错误: 无法启动 HID 唤醒: "
                 << wake_error << "\n";

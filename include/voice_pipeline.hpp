@@ -47,6 +47,7 @@ struct VoicePipelineContext {
     bool* is_speaking;
     std::atomic<bool>* barge_in_recording;
     std::vector<float>* vad_frame_buffer;
+    std::mutex* vad_state_mutex;
     std::deque<std::vector<float>>* pre_buffer;
 
 #ifdef USE_MCP

@@ -129,6 +129,16 @@ bool collectValidToolCalls(const std::string& tool_calls_json,
 }  // namespace
 #endif
 
+namespace {
+
+void resetVadState(VoicePipelineContext& ctx) {
+    std::lock_guard<std::mutex> lock(*ctx.vad_state_mutex);
+    ctx.vad_frame_buffer->clear();
+    ctx.vad->Reset();
+}
+
+}  // namespace
+
 void playStartupGreeting(VoicePipelineContext& ctx, const std::string& greeting) {
     if (greeting.empty() || !g_running) return;
 
@@ -172,8 +182,7 @@ void playStartupGreeting(VoicePipelineContext& ctx, const std::string& greeting)
         *ctx.is_speaking = false;
     }
     *ctx.barge_in_recording = false;
-    ctx.vad_frame_buffer->clear();
-    ctx.vad->Reset();
+    resetVadState(ctx);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     g_barge_in = false;
@@ -440,8 +449,7 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
             *ctx.is_speaking = false;
         }
         *ctx.barge_in_recording = false;
-        ctx.vad_frame_buffer->clear();
-        ctx.vad->Reset();
+        resetVadState(ctx);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         std::cout << getTimestamp() << " [TTS] 播放完成，缓冲区已清理\n";
     } else {
