@@ -99,6 +99,9 @@ struct WakeCfg {
     bool interrupt_mode = true;
     // 唤醒打断后播放的提示音。
     std::string ack_audio = "/root/.cache/models/assets/audio/006_im_here.wav";
+    // 默认唤醒提示音缺失时的下载地址；空字符串表示不自动下载。
+    std::string ack_audio_url =
+        "https://archive.spacemit.com/spacemit-ai/model_zoo/assets/audio/006_im_here.wav";
     // 是否丢弃唤醒词对应的 ASR 输入。
     bool drop_wake_asr = true;
     // 唤醒后丢弃录音输入的最大保护窗口，低能量命令可提前放行，单位毫秒。

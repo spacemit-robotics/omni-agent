@@ -89,6 +89,7 @@ const char* kVoiceChatConfigTemplate = R"({
         "device": "/dev/hidraw0",
         "interrupt_mode": true,
         "ack_audio": "/root/.cache/models/assets/audio/006_im_here.wav",
+        "ack_audio_url": "https://archive.spacemit.com/spacemit-ai/model_zoo/assets/audio/006_im_here.wav",
         "drop_wake_asr": true,
         "drop_audio_ms": 500,
         "post_ack_tail_ms": 0
@@ -280,6 +281,7 @@ void ParseWake(const json& j, WakeCfg& wake) {
     GetOpt(w, "device", wake.device);
     GetOpt(w, "interrupt_mode", wake.interrupt_mode);
     GetOpt(w, "ack_audio", wake.ack_audio);
+    GetOpt(w, "ack_audio_url", wake.ack_audio_url);
     GetOpt(w, "drop_wake_asr", wake.drop_wake_asr);
     GetOpt(w, "drop_audio_ms", wake.drop_audio_ms);
     GetOpt(w, "post_ack_tail_ms", wake.post_ack_tail_ms);
@@ -562,6 +564,7 @@ json VoiceChatJson(const DaemonConfig& cfg) {
         {"device", cfg.wake.device},
         {"interrupt_mode", cfg.wake.interrupt_mode},
         {"ack_audio", cfg.wake.ack_audio},
+        {"ack_audio_url", cfg.wake.ack_audio_url},
         {"drop_wake_asr", cfg.wake.drop_wake_asr},
         {"drop_audio_ms", cfg.wake.drop_audio_ms},
         {"post_ack_tail_ms", cfg.wake.post_ack_tail_ms},

@@ -415,11 +415,13 @@ add_executable(voice_chat_daemon
 target_include_directories(voice_chat_daemon PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${AUDIO_INCLUDE_DIR}
+    ${CURL_INCLUDE_DIRS}
     ${PORTAUDIO_INCLUDE_DIRS}
 )
 
 target_link_libraries(voice_chat_daemon
     ${SPACEMIT_AUDIO_LIB}
+    ${CURL_LIBRARIES}
     ${PORTAUDIO_LIBRARIES}
     pthread
 )

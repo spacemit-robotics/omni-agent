@@ -391,14 +391,12 @@ size_t AecDuplexProcessor::fillOutputBuffer(float* output, size_t frames,
         fade_frames--;
         fade_out_frames_.store(fade_frames);
 
-        // 淡出完成，清空队列
+        // 淡出完成，只丢弃当前旧音频；clearPlayback() 之后新入队的音频
+        // 需要保留，例如 HID 唤醒提示音。
         if (fade_frames == 0) {
-            while (!playback_queue_.empty()) {
-                playback_queue_.pop();
-            }
             current_playback_.samples.clear();
             current_playback_.position = 0;
-            is_playing_.store(false);
+            is_playing_.store(!playback_queue_.empty());
         }
 
         return samples_written;
@@ -526,9 +524,21 @@ void AecDuplexProcessor::enqueuePlayback(const float* samples, size_t count, int
 }
 
 void AecDuplexProcessor::clearPlayback() {
-    // 不立即清空，设置淡出标志，避免 AEC 参考信号突变
-    // 淡出会在 fillOutputBuffer() 中执行
-    fade_out_frames_.store(kFadeOutFrames);
+    std::lock_guard<std::mutex> lock(playback_mutex_);
+    while (!playback_queue_.empty()) {
+        playback_queue_.pop();
+    }
+    // 不立即清空当前正在写出的音频，设置淡出标志，避免 AEC 参考信号突变。
+    // 淡出会在 fillOutputBuffer() 中执行。
+    if (!current_playback_.samples.empty() &&
+            current_playback_.position < current_playback_.samples.size()) {
+        fade_out_frames_.store(kFadeOutFrames);
+    } else {
+        current_playback_.samples.clear();
+        current_playback_.position = 0;
+        fade_out_frames_.store(0);
+        is_playing_.store(false);
+    }
 }
 
 size_t AecDuplexProcessor::getPlaybackQueueSize() const {

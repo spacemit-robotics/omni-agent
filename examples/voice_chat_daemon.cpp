@@ -43,6 +43,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <curl/curl.h>
 
 #include "audio_base.hpp"
 #include "daemon_config.hpp"
@@ -132,6 +133,93 @@ bool MakeDirs(const std::string& path) {
 std::string ParentDir(const std::string& path) {
     size_t s = path.find_last_of('/');
     return s == std::string::npos ? "." : path.substr(0, s);
+}
+
+size_t WriteDownloadFile(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    FILE* f = static_cast<FILE*>(userdata);
+    size_t bytes = size * nmemb;
+    return std::fwrite(ptr, 1, bytes, f);
+}
+
+bool DownloadFile(const std::string& url, const std::string& path,
+        std::string* error) {
+    if (url.empty()) {
+        if (error) *error = "download URL is empty";
+        return false;
+    }
+    if (!MakeDirs(ParentDir(path))) {
+        if (error) *error = "failed to create directory: " + ParentDir(path);
+        return false;
+    }
+
+    std::string tmp_path = path + ".tmp." + std::to_string(getpid());
+    FILE* out = std::fopen(tmp_path.c_str(), "wb");
+    if (!out) {
+        if (error) {
+            *error = tmp_path + ": " + std::strerror(errno);
+        }
+        return false;
+    }
+
+    if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
+        std::fclose(out);
+        std::remove(tmp_path.c_str());
+        if (error) *error = "curl_global_init failed";
+        return false;
+    }
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        std::fclose(out);
+        std::remove(tmp_path.c_str());
+        if (error) *error = "curl_easy_init failed";
+        return false;
+    }
+
+    char errbuf[CURL_ERROR_SIZE] = {0};
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteDownloadFile);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, out);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "omni_agent/voice_chat_daemon");
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+
+    CURLcode rc = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+
+    bool close_ok = std::fclose(out) == 0;
+    if (rc != CURLE_OK) {
+        std::remove(tmp_path.c_str());
+        const char* msg = errbuf[0] ? errbuf : curl_easy_strerror(rc);
+        if (error) *error = std::string("curl: ") + msg;
+        return false;
+    }
+    if (http_code >= 400) {
+        std::remove(tmp_path.c_str());
+        if (error) {
+            *error = "HTTP " + std::to_string(http_code) + " from " + url;
+        }
+        return false;
+    }
+    if (!close_ok) {
+        std::remove(tmp_path.c_str());
+        if (error) *error = tmp_path + ": failed to flush file";
+        return false;
+    }
+    if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
+        std::remove(tmp_path.c_str());
+        if (error) {
+            *error = "rename " + tmp_path + " -> " + path + ": "
+                + std::strerror(errno);
+        }
+        return false;
+    }
+    return true;
 }
 
 bool HasFlag(int argc, char** argv, const std::string& flag) {
@@ -534,6 +622,32 @@ std::string EffectiveAsrEndpoint(const DaemonConfig& cfg) {
 
 bool ShouldStartLocalAsr(const DaemonConfig& cfg) {
     return IsQwen3Asr(cfg.asr.engine) && cfg.asr.auto_start_server;
+}
+
+bool EnsureWakeAckAudio(const DaemonConfig& cfg) {
+    if (!cfg.wake.enabled || !cfg.wake.interrupt_mode ||
+            cfg.wake.ack_audio.empty()) {
+        return true;
+    }
+    if (FileExists(cfg.wake.ack_audio)) {
+        return true;
+    }
+    if (cfg.wake.ack_audio_url.empty()) {
+        std::cerr << "错误: 唤醒提示音不存在: " << cfg.wake.ack_audio << "\n";
+        std::cerr << "      wake.ack_audio_url 为空，无法自动下载\n";
+        return false;
+    }
+
+    std::cerr << "[info] downloading wake ack audio " << cfg.wake.ack_audio_url
+        << "\n";
+    std::string error;
+    if (!DownloadFile(cfg.wake.ack_audio_url, cfg.wake.ack_audio, &error)) {
+        std::cerr << "错误: 下载唤醒提示音失败: " << error << "\n";
+        std::cerr << "      target: " << cfg.wake.ack_audio << "\n";
+        return false;
+    }
+    std::cerr << "[info] wake ack audio ready: " << cfg.wake.ack_audio << "\n";
+    return true;
 }
 
 bool HttpHealthOk(const std::string& host, int port) {
@@ -1254,6 +1368,9 @@ int CmdStart(int argc, char** argv) {
         std::cerr << "参考地址: " << cfg.asr.model_url << "\n";
         return 1;
     }
+    if (!EnsureWakeAckAudio(cfg)) {
+        return 1;
+    }
 
     // 5. 音频设备解析
     int input_id = cfg.audio.input_device_id;
@@ -1663,10 +1780,8 @@ int CmdStart(int argc, char** argv) {
         vc_args.push_back(cfg.wake.interrupt_mode
             ? "--wake-interrupt-mode"
             : "--no-wake-interrupt-mode");
-        if (!cfg.wake.ack_audio.empty()) {
-            vc_args.push_back("--wake-ack-audio");
-            vc_args.push_back(cfg.wake.ack_audio);
-        }
+        vc_args.push_back("--wake-ack-audio");
+        vc_args.push_back(cfg.wake.ack_audio);
         vc_args.push_back(cfg.wake.drop_wake_asr
             ? "--wake-drop-asr"
             : "--no-wake-drop-asr");

@@ -30,6 +30,17 @@ using json = nlohmann::json;
 namespace {
 constexpr int kAsrWarmupSampleRate = 16000;
 constexpr int kAsrWarmupSamples = kAsrWarmupSampleRate / 2;  // 0.5s silence.
+
+std::string normalizeAsrEngine(const std::string& engine) {
+    if (engine.empty()) {
+        return "qwen3-asr";
+    }
+    if (engine == "qwen3_asr") {
+        return "qwen3-asr";
+    }
+    return engine;
+}
+
 }  // namespace
 
 LLMInitResult initLLM(const std::string& llm_model, const std::string& llm_url,
@@ -117,7 +128,7 @@ std::shared_ptr<SpacemiT::AsrEngine> initASR(
     const std::string& asr_endpoint,
     const std::string& asr_model,
     int asr_timeout) {
-    std::string engine = asr_engine.empty() ? "qwen3-asr" : asr_engine;
+    std::string engine = normalizeAsrEngine(asr_engine);
     std::cout << getTimestamp() << " [3/5] 初始化 ASR (" << engine
         << ")..." << std::flush;
 

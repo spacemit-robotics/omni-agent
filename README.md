@@ -172,7 +172,7 @@ voice_chat_daemon restart
 | 换音频设备或采样率 | `voice_chat.json` 的 `audio` |
 | 调 VAD 灵敏度 | `voice_chat.json` 的 `vad.threshold` / `vad.silence_duration` |
 | 切换 ASR 后端 | `voice_chat.json` 的 `asr.engine`，默认 `qwen3-asr`；qwen3-asr 还需 `asr.endpoint` / `asr.model` |
-| 开启 HID 唤醒打断 | `voice_chat.json` 的 `wake.enabled` / `wake.device` / `wake.interrupt_mode` / `wake.ack_audio` / `wake.post_ack_tail_ms` |
+| 开启 HID 唤醒打断 | `voice_chat.json` 的 `wake.enabled` / `wake.device` / `wake.interrupt_mode` / `wake.ack_audio` / `wake.ack_audio_url` / `wake.post_ack_tail_ms` |
 | 修改或关闭启动问候 | `voice_chat.json` 的 `startup_greeting`；设为空字符串可关闭 |
 | 保存调试录音、ASR 输入或 TTS 输出 | `voice_chat.json` 的 `debug.save_audio` / `debug.save_asr_audio` / `debug.save_tts_audio` |
 | 换模型、端口、线程数 | `llm.json` |
