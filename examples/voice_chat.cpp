@@ -823,13 +823,39 @@ int main(int argc, char* argv[]) {
         }
     });
 
+    auto resampleForPlayback = [&](const std::vector<float>& float_samples, int src_rate) {
+        if (float_samples.empty()) {
+            return std::vector<float>{};
+        }
+        if (src_rate <= 0 || src_rate == cfg.playback_rate) {
+            return float_samples;
+        }
+        if (src_rate == tts_sample_rate && playback_resampler) {
+            return playback_resampler->process(float_samples);
+        }
+
+        Resampler::Config rconf;
+        rconf.input_sample_rate = src_rate;
+        rconf.output_sample_rate = cfg.playback_rate;
+        rconf.channels = 1;
+        rconf.method = (src_rate < cfg.playback_rate)
+            ? ResampleMethod::LINEAR_UPSAMPLE
+            : ResampleMethod::LINEAR_DOWNSAMPLE;
+        Resampler resampler(rconf);
+        if (!resampler.initialize()) {
+            std::cerr << getTimestamp()
+                << " [Audio] 播放重采样器初始化失败: "
+                << src_rate << "Hz -> " << cfg.playback_rate << "Hz\n";
+            return std::vector<float>{};
+        }
+        return resampler.process(float_samples);
+    };
+
     // 入队播放数据：float mono -> resample -> expand channels -> PCM16 bytes -> enqueue
     auto enqueuePlayback = [&](const std::vector<float>& float_samples, int src_rate) {
-        std::vector<float> resampled;
-        if (src_rate != cfg.playback_rate && playback_resampler) {
-            resampled = playback_resampler->process(float_samples);
-        } else {
-            resampled = float_samples;
+        std::vector<float> resampled = resampleForPlayback(float_samples, src_rate);
+        if (resampled.empty()) {
+            return;
         }
 
         size_t invalid_samples = 0;
