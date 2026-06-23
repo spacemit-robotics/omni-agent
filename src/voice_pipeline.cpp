@@ -438,9 +438,6 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
 
     // Clean up buffers
     if (!g_barge_in) {
-        if (ctx.reset_capture && !ctx.reset_capture()) {
-            g_running = false;
-        }
         {
             std::lock_guard<std::mutex> lock(*ctx.buffer_mutex);
             ctx.audio_buffer->clear();

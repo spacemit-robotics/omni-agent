@@ -891,10 +891,6 @@ int main(int argc, char* argv[]) {
         is_playing = false;
     };
 
-    auto resetCapture = [&]() -> bool {
-        return true;
-    };
-
     // -------------------------------------------------------------------------
     // 状态变量
     // -------------------------------------------------------------------------
@@ -963,7 +959,6 @@ int main(int argc, char* argv[]) {
     pipeline_ctx.enqueue_playback = enqueuePlayback;
     pipeline_ctx.is_playing = [&]() { return is_playing.load(); };
     pipeline_ctx.clear_playback = clearPlayback;
-    pipeline_ctx.reset_capture = resetCapture;
     pipeline_ctx.audio_buffer = &audio_buffer;
     pipeline_ctx.buffer_mutex = &buffer_mutex;
     pipeline_ctx.silence_frames = &silence_frames_count;
