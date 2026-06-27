@@ -129,6 +129,28 @@ bool collectValidToolCalls(const std::string& tool_calls_json,
 }  // namespace
 #endif
 
+namespace {
+
+void resetVadState(VoicePipelineContext& ctx) {
+    std::lock_guard<std::mutex> lock(*ctx.vad_state_mutex);
+    ctx.vad_frame_buffer->clear();
+    ctx.vad->Reset();
+}
+
+void resetInputState(VoicePipelineContext& ctx) {
+    {
+        std::lock_guard<std::mutex> lock(*ctx.buffer_mutex);
+        ctx.audio_buffer->clear();
+        ctx.pre_buffer->clear();
+        *ctx.silence_frames = 0;
+        *ctx.is_speaking = false;
+    }
+    *ctx.barge_in_recording = false;
+    resetVadState(ctx);
+}
+
+}  // namespace
+
 void playStartupGreeting(VoicePipelineContext& ctx, const std::string& greeting) {
     if (greeting.empty() || !g_running) return;
 
@@ -164,18 +186,10 @@ void playStartupGreeting(VoicePipelineContext& ctx, const std::string& greeting)
         std::cerr << getTimestamp() << " [TTS] 启动问候合成失败\n";
     }
 
-    {
-        std::lock_guard<std::mutex> lock(*ctx.buffer_mutex);
-        ctx.audio_buffer->clear();
-        ctx.pre_buffer->clear();
-        *ctx.silence_frames = 0;
-        *ctx.is_speaking = false;
-    }
-    *ctx.barge_in_recording = false;
-    ctx.vad_frame_buffer->clear();
-    ctx.vad->Reset();
+    resetInputState(ctx);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
+    g_barge_in = false;
     g_processing = false;
 }
 
@@ -428,20 +442,12 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
 
     // Clean up buffers
     if (!g_barge_in) {
-        if (ctx.reset_capture && !ctx.reset_capture()) {
-            g_running = false;
-        }
-        {
-            std::lock_guard<std::mutex> lock(*ctx.buffer_mutex);
-            ctx.audio_buffer->clear();
-            ctx.pre_buffer->clear();
-            *ctx.silence_frames = 0;
-            *ctx.is_speaking = false;
-        }
-        *ctx.barge_in_recording = false;
-        ctx.vad_frame_buffer->clear();
-        ctx.vad->Reset();
+        resetInputState(ctx);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (ctx.flush_pending_capture) {
+            ctx.flush_pending_capture();
+        }
+        resetInputState(ctx);
         std::cout << getTimestamp() << " [TTS] 播放完成，缓冲区已清理\n";
     } else {
         std::cout << getTimestamp() << " [TTS] Barge-in 打断，保留音频缓冲区\n";

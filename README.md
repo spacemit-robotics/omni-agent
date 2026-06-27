@@ -55,7 +55,7 @@ voice_chat_daemon config-show
 
 | 文件 | 职责 |
 | --- | --- |
-| `voice_chat.json` | 运行模式、音频设备、TTS、VAD、启动问候、调试录音/TTS 音频、daemon 日志和 PID 路径 |
+| `voice_chat.json` | 运行模式、音频设备、TTS、VAD、HID 唤醒、启动问候、调试录音/TTS 音频、daemon 日志和 PID 路径 |
 | `llm.json` | 本地 llama-server 或云端 OpenAI-compatible LLM、模型名、密钥、`max_tokens`、`reasoning_budget`、`system_prompt` |
 | `voiceprint.json` | 声纹验证开关、数据库、阈值、verify 目标 |
 | `mcp.json` | MCP client 开关、registry 和 servers；servers schema 复用 `components/agent_tools/mcp/examples/configs/` |
@@ -171,8 +171,10 @@ voice_chat_daemon restart
 | --- | --- |
 | 换音频设备或采样率 | `voice_chat.json` 的 `audio` |
 | 调 VAD 灵敏度 | `voice_chat.json` 的 `vad.threshold` / `vad.silence_duration` |
+| 切换 ASR 后端 | `voice_chat.json` 的 `asr.engine`，默认 `qwen3-asr`；qwen3-asr 还需 `asr.endpoint` / `asr.model` |
+| 开启 HID 唤醒打断 | `voice_chat.json` 的 `wake.enabled` / `wake.device` / `wake.interrupt_mode` / `wake.ack_audio` / `wake.ack_audio_url` / `wake.post_ack_tail_ms` |
 | 修改或关闭启动问候 | `voice_chat.json` 的 `startup_greeting`；设为空字符串可关闭 |
-| 保存调试录音或 TTS 输出 | `voice_chat.json` 的 `debug.save_audio` / `debug.save_tts_audio` |
+| 保存调试录音、ASR 输入或 TTS 输出 | `voice_chat.json` 的 `debug.save_audio` / `debug.save_asr_audio` / `debug.save_tts_audio` |
 | 换模型、端口、线程数 | `llm.json` |
 | 调回复长度、思考输出或系统提示词 | `llm.json` 的 `max_tokens` / `reasoning_budget` / `system_prompt` |
 | 启用声纹验证 | `voiceprint.json` 的 `enabled` / `verify` |
@@ -189,13 +191,20 @@ cd application/native/omni_agent && mm
 
 # 需要软件 AEC 时
 cd application/native/omni_agent && mm -DUSE_AEC=ON
+
+# 需要 voice_chat 的 WebRTC AGC/NS/HPF 前端时
+cd application/native/omni_agent && mm -DUSE_AUDIO_FRONTEND=ON
 ```
 
 | CMake 选项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `USE_MCP` | `ON` | MCP 工具调用支持 |
 | `USE_AEC` | `OFF` | 编译 `voice_chat_aec` |
+| `USE_AUDIO_FRONTEND` | `OFF` | 为 `voice_chat` 编译 WebRTC AGC/NS/HPF |
 | `USE_VP` | `ON` | 声纹验证支持 |
+
+`USE_AEC=ON` 或 `USE_AUDIO_FRONTEND=ON` 会拉取并构建
+`webrtc-audio-processing`，需要系统已安装 `meson` 和 `ninja-build`。
 
 ## 附录：底层调试工具
 
@@ -208,7 +217,7 @@ voice_chat --llm-url http://127.0.0.1:9191/v1 --model qwen2.5-0.5b --tts matcha:
 voice_chat -l
 ```
 
-常用参数包括 `-i/-o`、`--capture-rate`、`--playback-rate`、`--vad-threshold`、`--silence-duration`、`--max-tokens`、`--system-prompt`、`--mcp-config`、`-vp` 和 `--save-audio`。
+常用参数包括 `-i/-o`、`--capture-rate`、`--playback-rate`、`--vad-threshold`、`--silence-duration`、`--wake-enabled`、`--wake-device`、`--wake-interrupt-mode`、`--wake-ack-audio`、`--wake-post-ack-tail-ms`、`--max-tokens`、`--system-prompt`、`--mcp-config`、`-vp` 和 `--save-audio`。
 
 ### voice_chat_aec
 
@@ -216,7 +225,7 @@ voice_chat -l
 voice_chat_aec --llm-url http://127.0.0.1:9191/v1 --sample-rate 48000
 ```
 
-AEC 专用参数包括 `--no-aec`、`--no-ns`、`--agc`、`--aec-delay`、`--buffer-frames`。
+常用参数同 `voice_chat`，AEC 额外支持 `--no-aec`、`--no-ns`、`--agc`、`--aec-delay` 和 `--buffer-frames`。
 
 ### 声纹工具
 

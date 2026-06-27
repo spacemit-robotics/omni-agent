@@ -25,15 +25,26 @@ if(DEFINED ENV{SROBOTIS_WEBRTC_GIT_REPO})
   set(_WEBRTC_GIT_REPO "$ENV{SROBOTIS_WEBRTC_GIT_REPO}")
 endif()
 
+find_program(MESON_EXE meson)
+if(NOT MESON_EXE)
+  message(FATAL_ERROR
+    "meson is required when USE_AEC=ON or USE_AUDIO_FRONTEND=ON. "
+    "Install meson, or build without WebRTC audio processing.")
+endif()
+
+find_program(NINJA_EXE ninja)
+if(NOT NINJA_EXE)
+  message(FATAL_ERROR
+    "ninja is required when USE_AEC=ON or USE_AUDIO_FRONTEND=ON. "
+    "Install ninja-build, or build without WebRTC audio processing.")
+endif()
+
 fetch_thirdparty(NAME webrtc-audio-processing
   GIT_REPO "${_WEBRTC_GIT_REPO}" GIT_REF "master"
   OUT_SOURCE_DIR _WEBRTC_SRC)
 
 set(_WEBRTC_SOURCE_DIR "${_WEBRTC_SRC}")
 set(_WEBRTC_BINARY_DIR "${_WEBRTC_CACHE}/webrtc-audio-processing/build")
-
-find_program(MESON_EXE meson REQUIRED)
-find_program(NINJA_EXE ninja REQUIRED)
 
 include(ExternalProject)
 ExternalProject_Add(webrtc_ap_ep

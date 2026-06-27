@@ -140,7 +140,7 @@ public:
     void enqueuePlayback(const float* samples, size_t count, int sample_rate);
 
     /**
-     * Clear all queued playback
+     * Clear queued playback and fade out the currently playing buffer.
      */
     void clearPlayback();
 

@@ -26,6 +26,7 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -35,6 +36,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -43,6 +45,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <curl/curl.h>
 
 #include "audio_base.hpp"
 #include "daemon_config.hpp"
@@ -92,6 +95,36 @@ private:
     FILE* null_stream_ = nullptr;
 };
 
+class CurlGlobalRuntime {
+public:
+    CurlGlobalRuntime() = default;
+
+    bool Init(std::string* error) {
+        CURLcode rc = curl_global_init(CURL_GLOBAL_DEFAULT);
+        if (rc != CURLE_OK) {
+            if (error) {
+                *error = std::string("curl_global_init failed: ")
+                    + curl_easy_strerror(rc);
+            }
+            return false;
+        }
+        initialized_ = true;
+        return true;
+    }
+
+    ~CurlGlobalRuntime() {
+        if (initialized_) {
+            curl_global_cleanup();
+        }
+    }
+
+    CurlGlobalRuntime(const CurlGlobalRuntime&) = delete;
+    CurlGlobalRuntime& operator=(const CurlGlobalRuntime&) = delete;
+
+private:
+    bool initialized_ = false;
+};
+
 std::string Timestamp() {
     char buf[64];
     std::time_t t = std::time(nullptr);
@@ -132,6 +165,86 @@ bool MakeDirs(const std::string& path) {
 std::string ParentDir(const std::string& path) {
     size_t s = path.find_last_of('/');
     return s == std::string::npos ? "." : path.substr(0, s);
+}
+
+size_t WriteDownloadFile(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    FILE* f = static_cast<FILE*>(userdata);
+    size_t bytes = size * nmemb;
+    return std::fwrite(ptr, 1, bytes, f);
+}
+
+bool DownloadFile(const std::string& url, const std::string& path,
+        std::string* error) {
+    if (url.empty()) {
+        if (error) *error = "download URL is empty";
+        return false;
+    }
+    if (!MakeDirs(ParentDir(path))) {
+        if (error) *error = "failed to create directory: " + ParentDir(path);
+        return false;
+    }
+
+    std::string tmp_path = path + ".tmp." + std::to_string(getpid());
+    FILE* out = std::fopen(tmp_path.c_str(), "wb");
+    if (!out) {
+        if (error) {
+            *error = tmp_path + ": " + std::strerror(errno);
+        }
+        return false;
+    }
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        std::fclose(out);
+        std::remove(tmp_path.c_str());
+        if (error) *error = "curl_easy_init failed";
+        return false;
+    }
+
+    char errbuf[CURL_ERROR_SIZE] = {0};
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteDownloadFile);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, out);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "omni_agent/voice_chat_daemon");
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errbuf);
+
+    CURLcode rc = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+
+    bool close_ok = std::fclose(out) == 0;
+    if (rc != CURLE_OK) {
+        std::remove(tmp_path.c_str());
+        const char* msg = errbuf[0] ? errbuf : curl_easy_strerror(rc);
+        if (error) *error = std::string("curl: ") + msg;
+        return false;
+    }
+    if (http_code >= 400) {
+        std::remove(tmp_path.c_str());
+        if (error) {
+            *error = "HTTP " + std::to_string(http_code) + " from " + url;
+        }
+        return false;
+    }
+    if (!close_ok) {
+        std::remove(tmp_path.c_str());
+        if (error) *error = tmp_path + ": failed to flush file";
+        return false;
+    }
+    if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
+        std::remove(tmp_path.c_str());
+        if (error) {
+            *error = "rename " + tmp_path + " -> " + path + ": "
+                + std::strerror(errno);
+        }
+        return false;
+    }
+    return true;
 }
 
 bool HasFlag(int argc, char** argv, const std::string& flag) {
@@ -424,9 +537,10 @@ bool ResolveDevice(const char* kind,
 // -----------------------------------------------------------------------------
 
 struct PidRecord {
-    pid_t daemon_pid = 0;
-    pid_t llama_pid = 0;
-    pid_t voice_pid = 0;
+    pid_t daemon_pid = -1;
+    pid_t llama_pid = -1;
+    pid_t asr_pid = -1;
+    pid_t voice_pid = -1;
     std::string mode;
     std::string log_path;
 };
@@ -448,6 +562,8 @@ bool ReadPidFile(const std::string& path, PidRecord* out) {
             out->daemon_pid = std::stoi(v);
         } else if (k == "llama") {
             out->llama_pid = std::stoi(v);
+        } else if (k == "asr") {
+            out->asr_pid = std::stoi(v);
         } else if (k == "voice_chat") {
             out->voice_pid = std::stoi(v);
         } else if (k == "mode") {
@@ -469,10 +585,18 @@ bool WritePidFile(const std::string& path, const PidRecord& rec) {
     }
     f << "daemon=" << rec.daemon_pid << "\n";
     f << "llama=" << rec.llama_pid << "\n";
+    f << "asr=" << rec.asr_pid << "\n";
     f << "voice_chat=" << rec.voice_pid << "\n";
     f << "mode=" << rec.mode << "\n";
     f << "log=" << rec.log_path << "\n";
     return true;
+}
+
+std::string FormatPidStatus(pid_t pid) {
+    if (pid <= 0) {
+        return "-";
+    }
+    return std::to_string(pid) + (ProcessAlive(pid) ? "" : " (DEAD)");
 }
 
 void WriteStartupStatus(int fd, char status) {
@@ -507,6 +631,139 @@ std::string EffectiveLlmUrl(const DaemonConfig& cfg) {
 
 bool ShouldStartLocalLlm(const DaemonConfig& cfg) {
     return cfg.llm.auto_start_server && cfg.llm.api_base.empty();
+}
+
+bool IsQwen3Asr(const std::string& engine) {
+    return engine == "qwen3-asr" || engine == "qwen3_asr";
+}
+
+std::string EffectiveAsrEndpoint(const DaemonConfig& cfg) {
+    if (IsQwen3Asr(cfg.asr.engine) && cfg.asr.auto_start_server) {
+        return "http://" + cfg.asr.server_host + ":"
+            + std::to_string(cfg.asr.server_port) + "/v1/chat/completions";
+    }
+    return cfg.asr.endpoint;
+}
+
+bool ShouldStartLocalAsr(const DaemonConfig& cfg) {
+    return IsQwen3Asr(cfg.asr.engine) && cfg.asr.auto_start_server;
+}
+
+bool EnsureWakeAckAudio(const DaemonConfig& cfg) {
+    if (!cfg.wake.enabled || !cfg.wake.interrupt_mode ||
+            cfg.wake.ack_audio.empty()) {
+        return true;
+    }
+    if (FileExists(cfg.wake.ack_audio)) {
+        return true;
+    }
+    if (cfg.wake.ack_audio_url.empty()) {
+        std::cerr << "错误: 唤醒提示音不存在: " << cfg.wake.ack_audio << "\n";
+        std::cerr << "      wake.ack_audio_url 为空，无法自动下载\n";
+        return false;
+    }
+
+    std::cerr << "[info] downloading wake ack audio " << cfg.wake.ack_audio_url
+        << "\n";
+    std::string error;
+    if (!DownloadFile(cfg.wake.ack_audio_url, cfg.wake.ack_audio, &error)) {
+        std::cerr << "错误: 下载唤醒提示音失败: " << error << "\n";
+        std::cerr << "      target: " << cfg.wake.ack_audio << "\n";
+        return false;
+    }
+    std::cerr << "[info] wake ack audio ready: " << cfg.wake.ack_audio << "\n";
+    return true;
+}
+
+bool SetSocketTimeout(int fd, int timeout_ms) {
+    if (timeout_ms <= 0) {
+        timeout_ms = 1;
+    }
+    struct timeval tv {};
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 &&
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0;
+}
+
+int64_t MonotonicMs() {
+    struct timespec ts {};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+}
+
+bool HttpHealthOk(const std::string& host, int port, int timeout_ms) {
+    struct addrinfo hints {};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo* result = nullptr;
+    const std::string service = std::to_string(port);
+    int gai = getaddrinfo(host.c_str(), service.c_str(), &hints, &result);
+    if (gai != 0) {
+        return false;
+    }
+
+    bool ok = false;
+    for (struct addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
+        int s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (s < 0) {
+            continue;
+        }
+        if (!SetSocketTimeout(s, timeout_ms)) {
+            close(s);
+            continue;
+        }
+        if (connect(s, rp->ai_addr, rp->ai_addrlen) != 0) {
+            close(s);
+            continue;
+        }
+        const std::string request =
+            "GET /health HTTP/1.1\r\nHost: " + host
+            + "\r\nConnection: close\r\n\r\n";
+        ssize_t sent = send(s, request.data(), request.size(), 0);
+        if (sent < 0) {
+            close(s);
+            continue;
+        }
+
+        std::string response;
+        char buf[1024];
+        while (true) {
+            ssize_t n = recv(s, buf, sizeof(buf), 0);
+            if (n <= 0) {
+                break;
+            }
+            response.append(buf, n);
+            if (response.size() > 8192) {
+                break;
+            }
+        }
+        close(s);
+        if (response.find("HTTP/1.1 200") != std::string::npos ||
+                response.find("HTTP/1.0 200") != std::string::npos) {
+            ok = true;
+            break;
+        }
+    }
+    freeaddrinfo(result);
+    return ok;
+}
+
+bool WaitHttpHealthReady(const std::string& host, int port, int timeout_sec) {
+    if (timeout_sec <= 0) {
+        timeout_sec = 1;
+    }
+    const int64_t deadline_ms = MonotonicMs() + static_cast<int64_t>(timeout_sec) * 1000;
+    while (MonotonicMs() < deadline_ms) {
+        int64_t remaining_ms = deadline_ms - MonotonicMs();
+        int probe_timeout_ms = static_cast<int>(std::min<int64_t>(remaining_ms, 500));
+        if (HttpHealthOk(host, port, probe_timeout_ms)) {
+            return true;
+        }
+        usleep(250 * 1000);
+    }
+    return false;
 }
 
 std::string DirName(const std::string& path);
@@ -1104,14 +1361,25 @@ int CmdStart(int argc, char** argv) {
     }
 
     const bool start_local_llm = ShouldStartLocalLlm(cfg);
+    const bool start_local_asr = ShouldStartLocalAsr(cfg);
     const std::string llm_url = EffectiveLlmUrl(cfg);
+    const std::string asr_endpoint = EffectiveAsrEndpoint(cfg);
     if (!cfg.llm.api_base.empty()) {
         std::cerr << "[info] using external/cloud LLM API: " << llm_url << "\n";
+    }
+    if (IsQwen3Asr(cfg.asr.engine) && !start_local_asr) {
+        std::cerr << "[info] using external Qwen3-ASR API: " << asr_endpoint << "\n";
     }
 
     // 2. llama-server 预检
     if (start_local_llm && !BinaryOnPath(cfg.llm.server_binary)) {
         std::cerr << "错误: 未找到 " << cfg.llm.server_binary << "\n";
+        std::cerr << "安装方法:\n";
+        std::cerr << "  sudo apt install llama.cpp-tools-spacemit\n";
+        return 1;
+    }
+    if (start_local_asr && !BinaryOnPath(cfg.asr.server_binary)) {
+        std::cerr << "错误: 未找到 " << cfg.asr.server_binary << "\n";
         std::cerr << "安装方法:\n";
         std::cerr << "  sudo apt install llama.cpp-tools-spacemit\n";
         return 1;
@@ -1123,6 +1391,11 @@ int CmdStart(int argc, char** argv) {
         std::cerr << "排查: lsof -i :" << cfg.llm.server_port << "\n";
         return 1;
     }
+    if (start_local_asr && PortInUse(cfg.asr.server_host, cfg.asr.server_port)) {
+        std::cerr << "错误: 端口 " << cfg.asr.server_port << " 已被占用\n";
+        std::cerr << "排查: lsof -i :" << cfg.asr.server_port << "\n";
+        return 1;
+    }
 
     // 4. 模型预检
     if (start_local_llm && !FileExists(model_path)) {
@@ -1130,6 +1403,21 @@ int CmdStart(int argc, char** argv) {
         std::cerr << "请先准备模型文件，或在 llm.json 配置云端 api_base/api_key。\n";
         std::cerr << "模型目录: " << ParentDir(model_path) << "\n";
         std::cerr << "参考地址: " << cfg.llm.model_url << "\n";
+        return 1;
+    }
+    if (start_local_asr && !FileExists(cfg.asr.model_path)) {
+        std::cerr << "错误: 本地 Qwen3-ASR 模型不存在: " << cfg.asr.model_path << "\n";
+        std::cerr << "模型目录: " << ParentDir(cfg.asr.model_path) << "\n";
+        std::cerr << "参考地址: " << cfg.asr.model_url << "\n";
+        return 1;
+    }
+    if (start_local_asr && !DirExists(cfg.asr.smt_config_dir)) {
+        std::cerr << "错误: Qwen3-ASR SMT 配置目录不存在: "
+            << cfg.asr.smt_config_dir << "\n";
+        std::cerr << "参考地址: " << cfg.asr.model_url << "\n";
+        return 1;
+    }
+    if (!EnsureWakeAckAudio(cfg)) {
         return 1;
     }
 
@@ -1264,7 +1552,9 @@ int CmdStart(int argc, char** argv) {
     }
     if (p1 > 0) {
         close(startup_pipe[1]);
-        const int startup_wait_ticks = start_local_llm ? 700 : 100;
+        const int startup_wait_ticks = 100
+            + (start_local_llm ? 700 : 0)
+            + (start_local_asr ? (cfg.asr.startup_timeout + 10) * 10 : 0);
         bool startup_failed = false;
         for (int i = 0; i < startup_wait_ticks; ++i) {
             char status = 0;
@@ -1379,6 +1669,46 @@ int CmdStart(int argc, char** argv) {
         std::cerr << "[info] llama-server ready, pid=" << llama_pid << "\n";
     }
 
+    pid_t asr_pid = -1;
+    if (start_local_asr) {
+        std::vector<std::string> args = {
+            "-m", cfg.asr.model_path,
+            "--media-backend", "smt",
+            "--smt-config-dir", cfg.asr.smt_config_dir,
+            "--host", cfg.asr.server_host,
+            "--port", std::to_string(cfg.asr.server_port),
+            "-c", std::to_string(cfg.asr.ctx_size),
+            "-t", std::to_string(cfg.asr.threads),
+        };
+        for (const auto& e : cfg.asr.extra_args) {
+            args.push_back(e);
+        }
+        std::cerr << "[info] starting qwen3-asr server " << cfg.asr.model_path << "\n";
+        asr_pid = SpawnAsync(cfg.asr.server_binary, args);
+        if (asr_pid < 0) {
+            std::cerr << "错误: 启动 qwen3-asr server 失败\n";
+            WriteStartupStatus(startup_pipe[1], '0');
+            if (llama_pid > 0) {
+                kill(llama_pid, SIGTERM);
+            }
+            stop_mcp_if_started();
+            return 1;
+        }
+        if (!WaitHttpHealthReady(cfg.asr.server_host, cfg.asr.server_port,
+                cfg.asr.startup_timeout)) {
+            std::cerr << "错误: qwen3-asr server " << cfg.asr.startup_timeout
+                << " 秒内未就绪 (port " << cfg.asr.server_port << ")\n";
+            kill(asr_pid, SIGTERM);
+            if (llama_pid > 0) {
+                kill(llama_pid, SIGTERM);
+            }
+            WriteStartupStatus(startup_pipe[1], '0');
+            stop_mcp_if_started();
+            return 1;
+        }
+        std::cerr << "[info] qwen3-asr server ready, pid=" << asr_pid << "\n";
+    }
+
     // 10. 拉起 voice_chat / voice_chat_aec
     std::vector<std::string> vc_args = {
         "--tts", cfg.tts,
@@ -1428,9 +1758,40 @@ int CmdStart(int argc, char** argv) {
         vc_args.push_back(std::to_string(cfg.audio.capture_channels));
         vc_args.push_back("--playback-channels");
         vc_args.push_back(std::to_string(cfg.audio.playback_channels));
+        vc_args.push_back(cfg.audio_frontend.enabled
+            ? "--audio-frontend"
+            : "--no-audio-frontend");
+        vc_args.push_back(cfg.audio_frontend.highpass
+            ? "--audio-frontend-hpf"
+            : "--no-audio-frontend-hpf");
+        vc_args.push_back(cfg.audio_frontend.noise_suppression
+            ? "--audio-frontend-ns"
+            : "--no-audio-frontend-ns");
+        vc_args.push_back(cfg.audio_frontend.agc
+            ? "--audio-frontend-agc"
+            : "--no-audio-frontend-agc");
+        vc_args.push_back("--audio-frontend-agc-target");
+        vc_args.push_back(std::to_string(cfg.audio_frontend.agc_target_level_dbfs));
+        vc_args.push_back("--audio-frontend-agc-gain");
+        vc_args.push_back(std::to_string(cfg.audio_frontend.agc_compression_gain_db));
+        vc_args.push_back(cfg.audio_frontend.agc_limiter
+            ? "--audio-frontend-agc-limiter"
+            : "--no-audio-frontend-agc-limiter");
     }
     vc_args.push_back("--speech-channel");
     vc_args.push_back(std::to_string(cfg.audio.speech_channel));
+    vc_args.push_back("--asr-engine");
+    vc_args.push_back(cfg.asr.engine);
+    if (!asr_endpoint.empty()) {
+        vc_args.push_back("--asr-endpoint");
+        vc_args.push_back(asr_endpoint);
+    }
+    if (!cfg.asr.model.empty()) {
+        vc_args.push_back("--asr-model");
+        vc_args.push_back(cfg.asr.model);
+    }
+    vc_args.push_back("--asr-timeout");
+    vc_args.push_back(std::to_string(cfg.asr.timeout));
     if (cfg.doa.enabled) {
         vc_args.push_back("--doa");
         if (!cfg.doa.pick.empty()) {
@@ -1461,6 +1822,23 @@ int CmdStart(int argc, char** argv) {
         vc_args.push_back("--doa-closure-threshold-fraction");
         vc_args.push_back(std::to_string(cfg.doa.closure_threshold_fraction));
     }
+    if (cfg.wake.enabled) {
+        vc_args.push_back("--wake-enabled");
+        vc_args.push_back("--wake-device");
+        vc_args.push_back(cfg.wake.device);
+        vc_args.push_back(cfg.wake.interrupt_mode
+            ? "--wake-interrupt-mode"
+            : "--no-wake-interrupt-mode");
+        vc_args.push_back("--wake-ack-audio");
+        vc_args.push_back(cfg.wake.ack_audio);
+        vc_args.push_back(cfg.wake.drop_wake_asr
+            ? "--wake-drop-asr"
+            : "--no-wake-drop-asr");
+        vc_args.push_back("--wake-drop-audio-ms");
+        vc_args.push_back(std::to_string(cfg.wake.drop_audio_ms));
+        vc_args.push_back("--wake-post-ack-tail-ms");
+        vc_args.push_back(std::to_string(cfg.wake.post_ack_tail_ms));
+    }
     if (input_id >= 0) {
         vc_args.push_back("-i");
         vc_args.push_back(std::to_string(input_id));
@@ -1472,6 +1850,10 @@ int CmdStart(int argc, char** argv) {
     if (cfg.debug.save_audio) {
         vc_args.push_back("--save-audio");
         vc_args.push_back(cfg.debug.save_audio_file);
+    }
+    if (cfg.debug.save_asr_audio) {
+        vc_args.push_back("--save-asr-audio");
+        vc_args.push_back(cfg.debug.save_asr_audio_file);
     }
     if (cfg.debug.save_tts_audio) {
         vc_args.push_back("--save-tts-audio");
@@ -1506,6 +1888,9 @@ int CmdStart(int argc, char** argv) {
     if (voice_pid < 0) {
         std::cerr << "错误: 启动 " << cfg.mode << " 失败\n";
         WriteStartupStatus(startup_pipe[1], '0');
+        if (asr_pid > 0) {
+            kill(asr_pid, SIGTERM);
+        }
         if (llama_pid > 0) {
             kill(llama_pid, SIGTERM);
         }
@@ -1514,23 +1899,66 @@ int CmdStart(int argc, char** argv) {
     }
     std::cerr << "[info] " << cfg.mode << " started, pid=" << voice_pid << "\n";
 
+    auto stop_started_children = [&]() {
+        if (voice_pid > 0) {
+            kill(voice_pid, SIGTERM);
+        }
+        if (asr_pid > 0) {
+            kill(asr_pid, SIGTERM);
+        }
+        if (llama_pid > 0) {
+            kill(llama_pid, SIGTERM);
+        }
+        stop_mcp_if_started();
+    };
+
     // 11. 写 PID 文件
     PidRecord rec;
     rec.daemon_pid = getpid();
     rec.llama_pid = llama_pid;
+    rec.asr_pid = asr_pid;
     rec.voice_pid = voice_pid;
     rec.mode = cfg.mode;
     rec.log_path = log_path;
     if (!WritePidFile(pid_file, rec)) {
         std::cerr << "错误: 写 PID 文件失败 " << pid_file << "\n";
         WriteStartupStatus(startup_pipe[1], '0');
-        if (voice_pid > 0) {
-            kill(voice_pid, SIGTERM);
+        stop_started_children();
+        return 1;
+    }
+
+    int voice_start_status = 0;
+    bool voice_exited_during_startup = false;
+    for (int i = 0; i < 10; ++i) {
+        pid_t dead = waitpid(voice_pid, &voice_start_status, WNOHANG);
+        if (dead == 0) {
+            usleep(100 * 1000);
+            continue;
         }
-        if (llama_pid > 0) {
-            kill(llama_pid, SIGTERM);
+        if (dead == voice_pid) {
+            voice_exited_during_startup = true;
+            voice_pid = -1;
+            break;
         }
-        stop_mcp_if_started();
+        if (dead < 0) {
+            if (errno == EINTR) {
+                --i;
+                continue;
+            }
+            if (errno == ECHILD) {
+                voice_exited_during_startup = true;
+                voice_pid = -1;
+            }
+            break;
+        }
+    }
+    if (voice_exited_during_startup) {
+        std::cerr << "错误: " << cfg.mode << " 启动后立即退出"
+            << " (status=" << voice_start_status << ")\n";
+        std::cerr << "      完整错误见 log: " << log_path << "\n";
+        WriteStartupStatus(startup_pipe[1], '0');
+        stop_started_children();
+        unlink(pid_file.c_str());
         return 1;
     }
     WriteStartupStatus(startup_pipe[1], '1');
@@ -1552,6 +1980,21 @@ int CmdStart(int argc, char** argv) {
             if (voice_pid > 0) {
                 kill(voice_pid, SIGTERM);
             }
+            if (asr_pid > 0) {
+                kill(asr_pid, SIGTERM);
+            }
+            break;
+        }
+        if (dead == asr_pid) {
+            std::cerr << "[warn] qwen3-asr server 退出 (status=" << status
+                << ")，停止 daemon\n";
+            asr_pid = -1;
+            if (voice_pid > 0) {
+                kill(voice_pid, SIGTERM);
+            }
+            if (llama_pid > 0) {
+                kill(llama_pid, SIGTERM);
+            }
             break;
         }
         if (dead == voice_pid) {
@@ -1565,6 +2008,9 @@ int CmdStart(int argc, char** argv) {
             std::cerr << "       然后 voice_chat_daemon stop && start。\n";
             std::cerr << "       完整错误见 log: " << log_path << "\n";
             voice_pid = -1;
+            if (asr_pid > 0) {
+                kill(asr_pid, SIGTERM);
+            }
             if (llama_pid > 0) {
                 kill(llama_pid, SIGTERM);
             }
@@ -1577,19 +2023,26 @@ int CmdStart(int argc, char** argv) {
     if (voice_pid > 0) {
         kill(voice_pid, SIGTERM);
     }
+    if (asr_pid > 0) {
+        kill(asr_pid, SIGTERM);
+    }
     if (llama_pid > 0) {
         kill(llama_pid, SIGTERM);
     }
     for (int i = 0; i < 20; ++i) {
         bool v = voice_pid > 0 && ProcessAlive(voice_pid);
+        bool a = asr_pid > 0 && ProcessAlive(asr_pid);
         bool l = llama_pid > 0 && ProcessAlive(llama_pid);
-        if (!v && !l) {
+        if (!v && !a && !l) {
             break;
         }
         usleep(250 * 1000);
     }
     if (voice_pid > 0 && ProcessAlive(voice_pid)) {
         kill(voice_pid, SIGKILL);
+    }
+    if (asr_pid > 0 && ProcessAlive(asr_pid)) {
+        kill(asr_pid, SIGKILL);
     }
     if (llama_pid > 0 && ProcessAlive(llama_pid)) {
         kill(llama_pid, SIGKILL);
@@ -1622,6 +2075,10 @@ int CmdStop() {
             std::cout << "清理残留 llama-server pid=" << rec.llama_pid << "\n";
             kill(rec.llama_pid, SIGKILL);
         }
+        if (rec.asr_pid > 0 && ProcessAlive(rec.asr_pid)) {
+            std::cout << "清理残留 qwen3-asr server pid=" << rec.asr_pid << "\n";
+            kill(rec.asr_pid, SIGKILL);
+        }
         if (rec.voice_pid > 0 && ProcessAlive(rec.voice_pid)) {
             std::cout << "清理残留 voice_chat pid=" << rec.voice_pid << "\n";
             kill(rec.voice_pid, SIGKILL);
@@ -1648,6 +2105,9 @@ int CmdStop() {
     }
     if (rec.llama_pid > 0 && ProcessAlive(rec.llama_pid)) {
         kill(rec.llama_pid, SIGKILL);
+    }
+    if (rec.asr_pid > 0 && ProcessAlive(rec.asr_pid)) {
+        kill(rec.asr_pid, SIGKILL);
     }
     if (rec.voice_pid > 0 && ProcessAlive(rec.voice_pid)) {
         kill(rec.voice_pid, SIGKILL);
@@ -1683,11 +2143,10 @@ int CmdStatus() {
         return 1;
     }
     std::cout << "voice_chat_daemon: running\n";
-    std::cout << "  daemon pid: " << rec.daemon_pid << "\n";
-    std::cout << "  llama  pid: " << rec.llama_pid
-        << (ProcessAlive(rec.llama_pid) ? "" : " (DEAD)") << "\n";
-    std::cout << "  voice  pid: " << rec.voice_pid
-        << (ProcessAlive(rec.voice_pid) ? "" : " (DEAD)") << "\n";
+    std::cout << "  daemon pid: " << FormatPidStatus(rec.daemon_pid) << "\n";
+    std::cout << "  llama  pid: " << FormatPidStatus(rec.llama_pid) << "\n";
+    std::cout << "  asr    pid: " << FormatPidStatus(rec.asr_pid) << "\n";
+    std::cout << "  voice  pid: " << FormatPidStatus(rec.voice_pid) << "\n";
     std::cout << "  mode:       " << rec.mode << "\n";
     std::cout << "  log:        " << rec.log_path << "\n";
     return 0;
@@ -1795,6 +2254,13 @@ void PrintUsage(const char* prog) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    CurlGlobalRuntime curl_runtime;
+    std::string curl_error;
+    if (!curl_runtime.Init(&curl_error)) {
+        std::cerr << "错误: " << curl_error << "\n";
+        return 1;
+    }
+
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--register-speaker") == 0) {
             if (i + 1 >= argc) {
