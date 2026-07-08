@@ -74,12 +74,12 @@ struct AsrCfg {
     int server_port = 8063;
     // Qwen3-ASR text GGUF 模型本地路径。
     std::string model_path =
-        "~/.cache/models/asr/qwen3asr/qwen3-asr-0.6B-dynq-q40/Qwen3-ASR-0.6B-text-q40.gguf";
+        "~/.cache/models/asr/qwen3-asr-0.6B-dynq-q40/Qwen3-ASR-0.6B-text-q40.gguf";
     // Qwen3-ASR 模型缺失时输出给用户的参考下载 URL。
     std::string model_url =
         "https://archive.spacemit.com/spacemit-ai/model_zoo/asr/qwen3-asr-0.6B-dynq-q40.tar.gz";
     // Qwen3-ASR SMT 多模态配置目录，包含 encoder onnx 与 config.json。
-    std::string smt_config_dir = "~/.cache/models/asr/qwen3asr/qwen3-asr-0.6B-dynq-q40";
+    std::string smt_config_dir = "~/.cache/models/asr/qwen3-asr-0.6B-dynq-q40";
     // Qwen3-ASR llama-server 上下文长度。
     int ctx_size = 4096;
     // Qwen3-ASR llama-server 推理线程数。
