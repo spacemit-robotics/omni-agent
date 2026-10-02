@@ -1213,6 +1213,12 @@ int CmdRegisterSpeaker(const std::string& name, bool force) {
     }
 
     DaemonConfig cfg = omni_agent::LoadConfig();
+    if (!cfg.voice_chat_status.error.empty()) {
+        std::cerr << "错误: voice_chat.json 解析失败: "
+            << cfg.voice_chat_status.path << ": "
+            << cfg.voice_chat_status.error << "\n";
+        return 1;
+    }
     PrintConfigLoadErrors(cfg);
 
     int input_id = cfg.audio.input_device_id;
@@ -1323,6 +1329,12 @@ int CmdStart(int argc, char** argv) {
     }
 
     DaemonConfig cfg = omni_agent::LoadConfig();
+    if (!cfg.voice_chat_status.error.empty()) {
+        std::cerr << "错误: voice_chat.json 解析失败: "
+            << cfg.voice_chat_status.path << ": "
+            << cfg.voice_chat_status.error << "\n";
+        return 1;
+    }
     PrintConfigLoadErrors(cfg);
     if (aec_override) {
         cfg.mode = "voice_chat_aec";
@@ -1339,6 +1351,11 @@ int CmdStart(int argc, char** argv) {
     }
     if (cfg.mode == "voice_chat" && cfg.aec_status.loaded) {
         std::cerr << "[info] aec.json ignored in voice_chat mode\n";
+    }
+    if (cfg.mode == "voice_chat" && cfg.wake.enabled && cfg.wake.source == "kws") {
+        std::cerr << "错误: wake.source=kws 需要 AEC 模式 (mode voice_chat_aec 或 --aec)；"
+            << "voice_chat 模式请改用 wake.source=hid\n";
+        return 1;
     }
 
     const std::string pid_file = cfg.pid_file;
@@ -1483,16 +1500,16 @@ int CmdStart(int argc, char** argv) {
 
     const int capture_rate = cfg.audio.capture_rate > 0 ? cfg.audio.capture_rate : 16000;
     const int playback_rate = cfg.audio.playback_rate > 0 ? cfg.audio.playback_rate : 48000;
-    int aec_sample_rate = 48000;
+    // WebRTC APM is characterised at 16/32/48 kHz. The SPV USB device only
+    // offers 16 kHz capture, so forcing 48 kHz here made AEC mode unusable on
+    // this hardware; accept any of the three instead.
+    int aec_sample_rate = capture_rate;
     if (cfg.mode == "voice_chat_aec") {
-        if (cfg.audio.capture_rate > 0) {
-            if (cfg.audio.capture_rate == 48000) {
-                aec_sample_rate = cfg.audio.capture_rate;
-            } else {
-                std::cerr << "[warn] AEC mode requires 48000 Hz capture; ignoring "
-                    << "voice_chat.json audio.capture_rate=" << cfg.audio.capture_rate
-                    << "\n";
-            }
+        if (aec_sample_rate != 16000 && aec_sample_rate != 32000 &&
+                aec_sample_rate != 48000) {
+            std::cerr << "[warn] AEC 模式不支持 " << aec_sample_rate
+                << " Hz 采集，回退到 48000\n";
+            aec_sample_rate = 48000;
         }
         std::cerr << "[info] AEC 采样率: " << aec_sample_rate << "\n";
     } else {
@@ -1530,7 +1547,22 @@ int CmdStart(int argc, char** argv) {
         stop_mcp_if_started();
         return 1;
     }
-    std::string log_path = log_dir + "/voice_chat-" + Timestamp() + ".log";
+    const std::string run_stamp = Timestamp();
+    std::string log_path = log_dir + "/voice_chat-" + run_stamp + ".log";
+
+    // AEC 调试音频与日志同名，便于对照。
+    std::string aec_dump_dir;
+    if (cfg.debug.save_aec_dump && cfg.mode != "voice_chat_aec") {
+        std::cerr << "[info] debug.save_aec_dump 仅在 voice_chat_aec 模式生效，已忽略\n";
+    } else if (cfg.debug.save_aec_dump) {
+        aec_dump_dir = cfg.debug.aec_dump_dir + "/" + run_stamp;
+        if (!MakeDirs(aec_dump_dir)) {
+            std::cerr << "错误: 无法创建 AEC 调试音频目录 " << aec_dump_dir << "\n";
+            stop_mcp_if_started();
+            return 1;
+        }
+        std::cerr << "[info] AEC 调试音频: " << aec_dump_dir << "\n";
+    }
 
     // 7. double-fork daemon
     int startup_pipe[2];
@@ -1745,6 +1777,22 @@ int CmdStart(int argc, char** argv) {
         }
         vc_args.push_back("--aec-delay");
         vc_args.push_back(std::to_string(cfg.aec.aec_delay_ms));
+        if (cfg.aec.reference_channel > 0) {
+            vc_args.push_back("--aec-reference-channel");
+            vc_args.push_back(std::to_string(cfg.aec.reference_channel));
+            vc_args.push_back("--aec-reference-gain");
+            vc_args.push_back(std::to_string(cfg.aec.reference_gain_db));
+        }
+        vc_args.push_back("--wake-echo-guard");
+        vc_args.push_back(cfg.aec.wake_echo_guard);
+        if (!cfg.aec.ns_level.empty()) {
+            vc_args.push_back("--ns-level");
+            vc_args.push_back(cfg.aec.ns_level);
+        }
+        if (cfg.aec.fixed_gain_db != 0.0f) {
+            vc_args.push_back("--fixed-gain");
+            vc_args.push_back(std::to_string(cfg.aec.fixed_gain_db));
+        }
         if (cfg.aec.buffer_frames > 0) {
             vc_args.push_back("--buffer-frames");
             vc_args.push_back(std::to_string(cfg.aec.buffer_frames));
@@ -1778,8 +1826,14 @@ int CmdStart(int argc, char** argv) {
             ? "--audio-frontend-agc-limiter"
             : "--no-audio-frontend-agc-limiter");
     }
+    // Software AEC has to run on the raw mic; aec.json can pick that channel
+    // without disturbing audio.speech_channel used by plain voice_chat mode.
+    const int speech_channel =
+        (cfg.mode == "voice_chat_aec" && cfg.aec.speech_channel > 0)
+            ? cfg.aec.speech_channel
+            : cfg.audio.speech_channel;
     vc_args.push_back("--speech-channel");
-    vc_args.push_back(std::to_string(cfg.audio.speech_channel));
+    vc_args.push_back(std::to_string(speech_channel));
     vc_args.push_back("--asr-engine");
     vc_args.push_back(cfg.asr.engine);
     if (!asr_endpoint.empty()) {
@@ -1823,21 +1877,53 @@ int CmdStart(int argc, char** argv) {
         vc_args.push_back(std::to_string(cfg.doa.closure_threshold_fraction));
     }
     if (cfg.wake.enabled) {
+        if (cfg.wake.legacy_drop_wake_asr_configured) {
+            std::cerr << "[warn] wake.drop_wake_asr 已弃用；"
+                << "请改用 wake.strip_from_asr\n";
+        }
+        if (cfg.wake.legacy_audio_drop_configured) {
+            std::cerr << "[warn] wake.drop_audio_ms/post_ack_tail_ms 已弃用；"
+                << "连续采集模式不会丢弃 HID 后的音频\n";
+        }
         vc_args.push_back("--wake-enabled");
-        vc_args.push_back("--wake-device");
-        vc_args.push_back(cfg.wake.device);
+        if (cfg.wake.source == "kws") {
+            vc_args.push_back("--wake-source");
+            vc_args.push_back("kws");
+            if (!cfg.wake.kws.model_dir.empty()) {
+                vc_args.push_back("--kws-model-dir");
+                vc_args.push_back(cfg.wake.kws.model_dir);
+            }
+            vc_args.push_back("--kws-threshold");
+            vc_args.push_back(std::to_string(cfg.wake.kws.threshold));
+            vc_args.push_back("--kws-holdoff-ms");
+            vc_args.push_back(std::to_string(cfg.wake.kws.holdoff_ms));
+            vc_args.push_back("--kws-partial-threshold");
+            vc_args.push_back(std::to_string(cfg.wake.kws.partial_threshold));
+            if (cfg.wake.kws.echo_null) {
+                vc_args.push_back("--kws-echo-null");
+                vc_args.push_back("--kws-echo-null-first-channel");
+                vc_args.push_back(std::to_string(cfg.wake.kws.echo_null_first_channel));
+            }
+        } else {
+            vc_args.push_back("--wake-source");
+            vc_args.push_back("hid");
+            vc_args.push_back("--wake-device");
+            vc_args.push_back(cfg.wake.device);
+        }
         vc_args.push_back(cfg.wake.interrupt_mode
             ? "--wake-interrupt-mode"
             : "--no-wake-interrupt-mode");
         vc_args.push_back("--wake-ack-audio");
         vc_args.push_back(cfg.wake.ack_audio);
-        vc_args.push_back(cfg.wake.drop_wake_asr
-            ? "--wake-drop-asr"
-            : "--no-wake-drop-asr");
-        vc_args.push_back("--wake-drop-audio-ms");
-        vc_args.push_back(std::to_string(cfg.wake.drop_audio_ms));
-        vc_args.push_back("--wake-post-ack-tail-ms");
-        vc_args.push_back(std::to_string(cfg.wake.post_ack_tail_ms));
+        vc_args.push_back(cfg.wake.strip_from_asr
+            ? "--wake-strip-asr"
+            : "--no-wake-strip-asr");
+        vc_args.push_back("--wake-command-timeout-ms");
+        vc_args.push_back(std::to_string(cfg.wake.command_timeout_ms));
+        for (const auto& phrase : omni_agent::flattenWakePhrases(cfg.wake.phrases)) {
+            vc_args.push_back("--wake-phrase");
+            vc_args.push_back(phrase);
+        }
     }
     if (input_id >= 0) {
         vc_args.push_back("-i");
@@ -1858,6 +1944,10 @@ int CmdStart(int argc, char** argv) {
     if (cfg.debug.save_tts_audio) {
         vc_args.push_back("--save-tts-audio");
         vc_args.push_back(cfg.debug.save_tts_audio_file);
+    }
+    if (!aec_dump_dir.empty()) {
+        vc_args.push_back("--aec-dump-dir");
+        vc_args.push_back(aec_dump_dir);
     }
     if (cfg.voiceprint.enabled) {
         vc_args.push_back("-vp");

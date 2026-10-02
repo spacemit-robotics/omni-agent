@@ -24,10 +24,6 @@
 
 namespace {
 
-bool startsWith(const std::string& text, const std::string& prefix) {
-    return text.rfind(prefix, 0) == 0;
-}
-
 std::string homeDir() {
     if (const char* home = std::getenv("HOME")) {
         if (home[0] != '\0') {
@@ -35,39 +31,6 @@ std::string homeDir() {
         }
     }
     return ".";
-}
-
-void trimWakeSeparators(std::string* text) {
-    static const std::vector<std::string> kSeparators = {
-        " ", "\t", "\n", "\r",
-        ".", ",", "!", "?", ":", ";",
-        "。", "，", "！", "？", "：", "；", "、",
-    };
-
-    bool changed = true;
-    while (changed && !text->empty()) {
-        changed = false;
-        for (const auto& sep : kSeparators) {
-            if (startsWith(*text, sep)) {
-                text->erase(0, sep.size());
-                changed = true;
-                break;
-            }
-        }
-    }
-
-    changed = true;
-    while (changed && !text->empty()) {
-        changed = false;
-        for (const auto& sep : kSeparators) {
-            if (text->size() >= sep.size() &&
-                    text->compare(text->size() - sep.size(), sep.size(), sep) == 0) {
-                text->erase(text->size() - sep.size());
-                changed = true;
-                break;
-            }
-        }
-    }
 }
 
 }  // namespace
@@ -310,51 +273,6 @@ std::vector<int16_t> floatToPcm16(const std::vector<float>& samples) {
     return pcm;
 }
 
-WakeAsrTextFilterResult filterWakeAsrText(const std::string& text) {
-    static const std::vector<std::string> kWakePrefixes = {
-        "小进小进",
-        "小金小金",
-        "小静小静",
-        "小晶小晶",
-        "小鲸小鲸",
-        "小新小新",
-        "小鑫小鑫",
-        "小近小近",
-        "小劲小劲",
-        "小丁小丁",
-        "小姐小姐",
-        "想金小金",
-        "响金响金",
-        "向金向金",
-    };
-
-    std::string filtered = text;
-    trimWakeSeparators(&filtered);
-
-    bool stripped = false;
-    bool matched = true;
-    while (matched && !filtered.empty()) {
-        matched = false;
-        for (const auto& prefix : kWakePrefixes) {
-            if (startsWith(filtered, prefix)) {
-                filtered.erase(0, prefix.size());
-                trimWakeSeparators(&filtered);
-                stripped = true;
-                matched = true;
-                break;
-            }
-        }
-    }
-
-    if (!stripped) {
-        return {text, false, false};
-    }
-    if (filtered.empty()) {
-        return {"", true, true};
-    }
-    return {filtered, true, false};
-}
-
 AsrAudioPreprocessStats preprocessAsrAudio(std::vector<float>* samples) {
     AsrAudioPreprocessStats stats;
     if (!samples || samples->empty()) {
@@ -480,6 +398,26 @@ bool loadWavMonoFloat(const std::string& filename, AudioClip* clip, std::string*
         clip->samples[static_cast<size_t>(frame)] = sum / info.channels;
     }
     return true;
+}
+
+size_t trimTrailingSilence(AudioClip* clip, float threshold_dbfs, int keep_ms) {
+    if (!clip || clip->sample_rate <= 0 || clip->samples.empty()) {
+        return 0;
+    }
+    const float threshold = std::pow(10.0f, threshold_dbfs / 20.0f);
+    size_t last = clip->samples.size();
+    while (last > 0 && std::fabs(clip->samples[last - 1]) < threshold) {
+        --last;
+    }
+    if (last == 0) {
+        return 0;
+    }
+    const size_t keep = static_cast<size_t>(clip->sample_rate) *
+        static_cast<size_t>(std::max(keep_ms, 0)) / 1000;
+    const size_t end = std::min(clip->samples.size(), last + keep);
+    const size_t removed = clip->samples.size() - end;
+    clip->samples.resize(end);
+    return removed;
 }
 
 void saveWav(const std::string& filename, const std::vector<int16_t>& data, int sample_rate) {

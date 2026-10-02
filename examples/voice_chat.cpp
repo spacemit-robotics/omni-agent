@@ -44,6 +44,7 @@
 
 // Shared modules
 #include "voice_common.hpp"
+#include "wake_text_filter.hpp"
 #include "engine_init.hpp"
 #include "hid_wake_listener.hpp"
 #include "voice_pipeline.hpp"
@@ -72,12 +73,15 @@ struct Config {
     std::string asr_model = "qwen3-asr";
     int asr_timeout = 60;
     bool wake_enabled = false;
+    std::string wake_source = "hid";       // voice_chat only supports the SPV board's HID report
     std::string wake_device = "/dev/hidraw0";
     bool wake_interrupt_mode = true;
     std::string wake_ack_audio = "~/.cache/models/assets/audio/006_im_here.wav";
-    bool wake_drop_asr = true;
-    int wake_drop_audio_ms = 500;
-    int wake_post_ack_tail_ms = 0;
+    bool wake_strip_asr = true;
+    std::vector<std::string> wake_phrases =
+        omni_agent::flattenWakePhrases(omni_agent::defaultWakePhrases());
+    bool wake_phrases_set = false;
+    int wake_command_timeout_ms = 5000;
     int max_tokens = 150;
     int reasoning_budget = -1;
     std::string system_prompt = "You are a helpful assistant.";
@@ -253,6 +257,8 @@ Config parseArgs(int argc, char* argv[]) {
             cfg.wake_enabled = true;
         } else if (strcmp(argv[i], "--no-wake") == 0) {
             cfg.wake_enabled = false;
+        } else if (strcmp(argv[i], "--wake-source") == 0 && i + 1 < argc) {
+            cfg.wake_source = argv[++i];
         } else if (strcmp(argv[i], "--wake-device") == 0 && i + 1 < argc) {
             cfg.wake_device = argv[++i];
         } else if (strcmp(argv[i], "--wake-interrupt-mode") == 0) {
@@ -261,14 +267,26 @@ Config parseArgs(int argc, char* argv[]) {
             cfg.wake_interrupt_mode = false;
         } else if (strcmp(argv[i], "--wake-ack-audio") == 0 && i + 1 < argc) {
             cfg.wake_ack_audio = argv[++i];
-        } else if (strcmp(argv[i], "--wake-drop-asr") == 0) {
-            cfg.wake_drop_asr = true;
-        } else if (strcmp(argv[i], "--no-wake-drop-asr") == 0) {
-            cfg.wake_drop_asr = false;
+        } else if ((strcmp(argv[i], "--wake-strip-asr") == 0) ||
+                (strcmp(argv[i], "--wake-drop-asr") == 0)) {
+            cfg.wake_strip_asr = true;
+        } else if ((strcmp(argv[i], "--no-wake-strip-asr") == 0) ||
+                (strcmp(argv[i], "--no-wake-drop-asr") == 0)) {
+            cfg.wake_strip_asr = false;
+        } else if (strcmp(argv[i], "--wake-phrase") == 0 && i + 1 < argc) {
+            if (!cfg.wake_phrases_set) {
+                cfg.wake_phrases.clear();
+                cfg.wake_phrases_set = true;
+            }
+            cfg.wake_phrases.emplace_back(argv[++i]);
+        } else if (strcmp(argv[i], "--wake-command-timeout-ms") == 0 && i + 1 < argc) {
+            cfg.wake_command_timeout_ms = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--wake-drop-audio-ms") == 0 && i + 1 < argc) {
-            cfg.wake_drop_audio_ms = std::stoi(argv[++i]);
+            ++i;
+            std::cerr << "警告: --wake-drop-audio-ms 已弃用，连续采集模式不会丢弃唤醒后音频\n";
         } else if (strcmp(argv[i], "--wake-post-ack-tail-ms") == 0 && i + 1 < argc) {
-            cfg.wake_post_ack_tail_ms = std::stoi(argv[++i]);
+            ++i;
+            std::cerr << "警告: --wake-post-ack-tail-ms 已弃用，连续采集模式不会等待提示音\n";
         } else if (strcmp(argv[i], "--max-tokens") == 0 && i + 1 < argc) {
             cfg.max_tokens = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--reasoning-budget") == 0 && i + 1 < argc) {
@@ -346,14 +364,15 @@ Config parseArgs(int argc, char* argv[]) {
                 << "\n唤醒:\n"
                 << "  --wake-enabled, --wake        开启 HID 唤醒打断\n"
                 << "  --no-wake                     关闭 HID 唤醒打断\n"
+                << "  --wake-source hid             唤醒来源，仅支持 hid (KWS 唤醒请用 voice_chat_aec)\n"
                 << "  --wake-device <path>          hidraw 设备 (默认: /dev/hidraw0)\n"
                 << "  --wake-interrupt-mode         唤醒只中断TTS并播放提示音\n"
                 << "  --no-wake-interrupt-mode      使用旧的唤醒后ASR插话模式\n"
                 << "  --wake-ack-audio <wav>        唤醒提示音\n"
-                << "  --wake-drop-asr               丢弃唤醒词对应的ASR输入\n"
-                << "  --no-wake-drop-asr            不启用唤醒后录音丢弃窗口\n"
-                << "  --wake-drop-audio-ms <ms>     唤醒后最大丢弃保护窗口 (默认: 500)\n"
-                << "  --wake-post-ack-tail-ms <ms>  保守模式: 提示音后继续丢弃录音时长 (默认: 0)\n"
+                << "  --wake-strip-asr              从ASR句首清除唤醒词\n"
+                << "  --no-wake-strip-asr           不清除ASR中的唤醒词\n"
+                << "  --wake-phrase <text>          可重复指定唤醒词或ASR别名; 指定后替换内置词表(含别名)\n"
+                << "  --wake-command-timeout-ms <n> 纯唤醒后等待命令的窗口 (默认: 5000)\n"
                 << "\nTTS:\n"
                 << "  --tts <engine>                TTS后端 (默认: matcha:zh-en)\n"
                 << "                                matcha:zh / matcha:en / matcha:zh-en\n"
@@ -536,6 +555,19 @@ int main(int argc, char* argv[]) {
     Config cfg = parseArgs(argc, argv);
     cfg.wake_ack_audio = expandUserPath(cfg.wake_ack_audio);
 
+    if (cfg.wake_command_timeout_ms <= 0) {
+        std::cerr << "错误: --wake-command-timeout-ms 必须大于0\n";
+        return 1;
+    }
+    if (cfg.wake_enabled && cfg.wake_strip_asr && cfg.wake_phrases.empty()) {
+        std::cerr << "错误: 开启唤醒词清洗时必须至少指定一个 --wake-phrase\n";
+        return 1;
+    }
+    if (cfg.wake_source != "hid") {
+        std::cerr << "错误: voice_chat 只支持 --wake-source hid，KWS 唤醒请用 voice_chat_aec\n";
+        return 1;
+    }
+
     if (cfg.list_devices) {
         listAudioDevices();
         return 0;
@@ -575,8 +607,9 @@ int main(int argc, char* argv[]) {
         std::cout << getTimestamp() << " 唤醒打断模式: "
             << (cfg.wake_interrupt_mode ? "ON" : "OFF")
             << " ack=" << cfg.wake_ack_audio
-            << " drop_ms=" << cfg.wake_drop_audio_ms
-            << " tail_ms=" << cfg.wake_post_ack_tail_ms << "\n";
+            << " strip_asr=" << (cfg.wake_strip_asr ? "on" : "off")
+            << " command_timeout_ms=" << cfg.wake_command_timeout_ms
+            << " phrases=" << cfg.wake_phrases.size() << "\n";
     }
     std::cout << getTimestamp() << " 录音: " << cfg.capture_rate << " Hz / "
         << cfg.capture_channels << " ch\n";
@@ -620,9 +653,13 @@ int main(int argc, char* argv[]) {
                 << cfg.wake_ack_audio << ": " << error << "\n";
             return 1;
         }
+        // Same trim as voice_chat_aec: the stock clip ends in ~0.6 s of digital silence.
+        const float clip_seconds = wake_ack_clip.samples.size() /
+            static_cast<float>(wake_ack_clip.sample_rate);
+        const size_t trimmed = trimTrailingSilence(&wake_ack_clip, -45.0f, 40);
         std::cout << getTimestamp() << " 唤醒提示音: " << cfg.wake_ack_audio
-            << " (" << wake_ack_clip.sample_rate << " Hz, "
-            << formatFloat(wake_ack_clip.samples.size() /
+            << " (" << wake_ack_clip.sample_rate << " Hz, " << formatFloat(clip_seconds, 2)
+            << "s, 裁去尾部静音 " << formatFloat(trimmed /
                 static_cast<float>(wake_ack_clip.sample_rate), 2) << "s)\n";
     }
 
@@ -934,21 +971,21 @@ int main(int argc, char* argv[]) {
     float vad_segment_max_prob = 0.0f;
 
     const size_t PRE_BUFFER_FRAMES = 30;
-    const size_t POST_WAKE_PRE_BUFFER_FRAMES = 6;
-    const long long WAKE_HARD_DROP_MS = 120;
-    const long long WAKE_EVENT_TTL_MS = 1500;
     std::deque<std::vector<float>> pre_buffer;
 
     int barge_in_confirm_frames = 0;
     const int BARGE_IN_CONFIRM_THRESHOLD = 5;
 
     std::atomic<bool> barge_in_recording{false};
-    std::atomic<long long> wake_barge_in_request_ms{0};
-    std::atomic<long long> wake_drop_until_ms{0};
-    std::atomic<long long> wake_drop_start_ms{0};
-    std::atomic<bool> wake_ready_pending{false};
-    std::atomic<bool> wake_command_pending{false};
-    std::atomic<bool> wake_asr_filter_pending{false};
+    std::atomic<uint64_t> wake_id_counter{0};
+    std::atomic<uint64_t> pending_wake_id{0};
+    std::atomic<uint64_t> active_wake_session_id{0};
+    std::atomic<long long> active_wake_deadline_ms{0};
+    std::atomic<uint64_t> dialogue_generation{0};
+    uint64_t utterance_wake_id = 0;
+    std::atomic<uint64_t> pending_initial_wake_segment_id{0};
+    bool utterance_contains_wake_event = false;
+    int post_wake_speech_frames = 0;
 
     std::vector<int16_t> recorded_audio;
     std::mutex record_mutex;
@@ -962,7 +999,14 @@ int main(int argc, char* argv[]) {
     VadProgressPrinter vad_progress;
     vad_progress.Start();
     omni_agent::HidWakeListener wake_listener;
-    std::queue<std::vector<float>> recognition_queue;
+    struct RecognitionJob {
+        std::vector<float> audio;
+        uint64_t wake_id = 0;
+        uint64_t generation = 0;
+        bool contains_wake_event = false;
+        int post_wake_speech_frames = 0;
+    };
+    std::queue<RecognitionJob> recognition_queue;
     std::mutex recognition_mutex;
     std::condition_variable recognition_cv;
 
@@ -1012,40 +1056,6 @@ int main(int argc, char* argv[]) {
             std::chrono::steady_clock::now().time_since_epoch()).count();
     };
 
-    auto consumeWakeRequest = [&]() -> bool {
-        long long wake_ms = wake_barge_in_request_ms.exchange(0);
-        if (wake_ms <= 0) {
-            return false;
-        }
-        long long age_ms = monotonicMs() - wake_ms;
-        return age_ms >= 0 && age_ms <= WAKE_EVENT_TTL_MS;
-    };
-
-    auto wakeDropDurationMs = [&]() -> int {
-        int duration_ms = std::max(0, cfg.wake_drop_audio_ms);
-        if (cfg.wake_post_ack_tail_ms > 0 &&
-                !wake_ack_clip.samples.empty() && wake_ack_clip.sample_rate > 0) {
-            int ack_ms = static_cast<int>(
-                wake_ack_clip.samples.size() * 1000 / wake_ack_clip.sample_rate);
-            duration_ms = std::max(duration_ms,
-                ack_ms + cfg.wake_post_ack_tail_ms);
-        }
-        return duration_ms;
-    };
-
-    auto isLoudWakeAudio = [](const std::vector<float>& samples) -> bool {
-        if (samples.empty()) return false;
-        double sum_sq = 0.0;
-        float peak = 0.0f;
-        for (float sample : samples) {
-            float abs_sample = std::abs(sample);
-            peak = std::max(peak, abs_sample);
-            sum_sq += static_cast<double>(sample) * sample;
-        }
-        float rms = static_cast<float>(std::sqrt(sum_sq / samples.size()));
-        return peak >= 0.40f || rms >= 0.14f;
-    };
-
     auto appendPreBuffer = [&](size_t max_frames) {
         size_t start = 0;
         if (pre_buffer.size() > max_frames) {
@@ -1058,41 +1068,120 @@ int main(int argc, char* argv[]) {
         pre_buffer.clear();
     };
 
-    auto resetWakeInputState = [&]() {
-        {
-            std::lock_guard<std::mutex> lock(buffer_mutex);
-            audio_buffer.clear();
-            pre_buffer.clear();
-            silence_frames_count = 0;
-            is_speaking = false;
-            vad_segment_max_prob = 0.0f;
-        }
-        barge_in_recording = false;
-        {
-            std::lock_guard<std::mutex> lock(vad_state_mutex);
-            vad_frame_buffer.clear();
-            vad->Reset();
-        }
-    };
-
     auto playWakeAck = [&]() {
         if (!wake_ack_clip.samples.empty() && wake_ack_clip.sample_rate > 0) {
             enqueuePlayback(wake_ack_clip.samples, wake_ack_clip.sample_rate);
         }
     };
 
-    auto enqueueRecognition = [&](std::vector<float> utterance) {
-        if (utterance.empty()) return;
+    auto expireWakeSession = [&]() {
+        uint64_t wake_id = active_wake_session_id.load(std::memory_order_acquire);
+        if (wake_id == 0 || monotonicMs() <= active_wake_deadline_ms.load()) {
+            return;
+        }
+        if (active_wake_session_id.compare_exchange_strong(wake_id, 0)) {
+            active_wake_deadline_ms.store(0);
+            uint64_t pending_id = wake_id;
+            pending_initial_wake_segment_id.compare_exchange_strong(
+                pending_id, 0, std::memory_order_acq_rel);
+            std::cout << getTimestamp() << " [Wake] wake_id=" << wake_id
+                << " command timeout\n" << std::flush;
+        }
+    };
+
+    auto closeWakeSession = [&](uint64_t wake_id) {
+        if (wake_id == 0) return;
+        uint64_t expected = wake_id;
+        if (active_wake_session_id.compare_exchange_strong(expected, 0)) {
+            active_wake_deadline_ms.store(0);
+            uint64_t pending_id = wake_id;
+            pending_initial_wake_segment_id.compare_exchange_strong(
+                pending_id, 0, std::memory_order_acq_rel);
+        }
+    };
+
+    auto consumeWakeRequest = [&]() -> uint64_t {
+        uint64_t wake_id = pending_wake_id.exchange(0, std::memory_order_acq_rel);
+        if (wake_id == 0) {
+            return 0;
+        }
+
+        const long long now_ms = monotonicMs();
+        const uint64_t generation =
+            dialogue_generation.load(std::memory_order_acquire);
+        active_wake_session_id.store(wake_id, std::memory_order_release);
+        active_wake_deadline_ms.store(
+            now_ms + cfg.wake_command_timeout_ms, std::memory_order_release);
+
+        const bool was_processing = g_processing.load();
+        if (was_processing) {
+            g_barge_in = true;
+        }
+        if (was_processing || is_playing.load()) {
+            clearPlayback();
+        }
+        if (cfg.wake_interrupt_mode) {
+            playWakeAck();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(buffer_mutex);
+            pending_initial_wake_segment_id.store(
+                wake_id, std::memory_order_release);
+            if (was_processing) {
+                // Unlike voice_chat_aec, recording opens at the wake: there is no AEC here, so
+                // the ack echo itself would trip VAD and an onset-opened segment gains nothing.
+                audio_buffer.clear();
+                appendPreBuffer(PRE_BUFFER_FRAMES);
+                is_speaking = true;
+                silence_frames_count = 0;
+                vad_segment_max_prob = 0.0f;
+                barge_in_recording = true;
+            }
+            if (is_speaking) {
+                utterance_wake_id = wake_id;
+                utterance_contains_wake_event = true;
+                post_wake_speech_frames = 0;
+                pending_initial_wake_segment_id.store(
+                    0, std::memory_order_release);
+            }
+        }
+        barge_in_confirm_frames = 0;
+
+        std::cout << "\n" << getTimestamp() << " [Wake] HID唤醒 wake_id="
+            << wake_id << " generation=" << generation;
+        if (was_processing) {
+            std::cout << "，已中断当前回复";
+        }
+        if (cfg.wake_interrupt_mode) {
+            std::cout << "，播放提示音";
+        }
+        std::cout << "\n" << std::flush;
+        return wake_id;
+    };
+
+    auto enqueueRecognition = [&](RecognitionJob job) {
+        if (job.audio.empty()) return;
         {
             std::lock_guard<std::mutex> lock(recognition_mutex);
-            recognition_queue.push(std::move(utterance));
+            g_processing = true;
+            recognition_queue.push(std::move(job));
         }
         recognition_cv.notify_one();
     };
 
+    // A job that ends without a reply clears g_processing only when no newer segment is
+    // queued: that segment set the flag when it was enqueued and still owns it.
+    auto finishRecognitionJob = [&]() {
+        std::lock_guard<std::mutex> lock(recognition_mutex);
+        if (recognition_queue.empty()) {
+            g_processing = false;
+        }
+    };
+
     std::thread recognition_thread([&]() {
         while (true) {
-            std::vector<float> utterance;
+            RecognitionJob job;
             {
                 std::unique_lock<std::mutex> lock(recognition_mutex);
                 recognition_cv.wait(lock, [&]() {
@@ -1104,9 +1193,17 @@ int main(int argc, char* argv[]) {
                     }
                     continue;
                 }
-                utterance = std::move(recognition_queue.front());
+                job = std::move(recognition_queue.front());
                 recognition_queue.pop();
             }
+
+            if (job.generation != dialogue_generation.load(std::memory_order_acquire)) {
+                std::cout << getTimestamp() << " [Wake] 丢弃过期识别任务 generation="
+                    << job.generation << "\n";
+                finishRecognitionJob();
+                continue;
+            }
+            auto& utterance = job.audio;
 
 #ifdef USE_VP
             std::string speaker_tag;
@@ -1184,7 +1281,7 @@ int main(int argc, char* argv[]) {
                         }
                     }
                     std::cout << std::endl;
-                    g_processing = false;
+                    finishRecognitionJob();
                     continue;
                 }
             }
@@ -1209,32 +1306,85 @@ int main(int argc, char* argv[]) {
 
             std::cout << getTimestamp() << " [ASR] 开始识别..." << std::endl;
             auto result = asr->Recognize(utterance, 16000);
+            if (job.generation != dialogue_generation.load(std::memory_order_acquire)) {
+                std::cout << getTimestamp() << " [Wake] 丢弃过期ASR结果 generation="
+                    << job.generation << "\n";
+                finishRecognitionJob();
+                continue;
+            }
             if (result && !result->IsEmpty()) {
                 std::string text = result->GetText();
                 std::cout << getTimestamp() << " [ASR] 识别完成: \""
                     << text << "\"" << std::endl;
-                bool apply_wake_text_filter =
-                    cfg.wake_enabled && cfg.wake_drop_asr;
-                if (wake_asr_filter_pending.exchange(false)) {
-                    apply_wake_text_filter = true;
+                if (text.empty()) {
+                    finishRecognitionJob();
+                    std::cout << getTimestamp()
+                        << " [ASR] 规范化后为空，不送入LLM\n";
+                    if (job.wake_id != 0 &&
+                            active_wake_session_id.load() == job.wake_id) {
+                        active_wake_deadline_ms.store(
+                            monotonicMs() + cfg.wake_command_timeout_ms);
+                        std::cout << getTimestamp()
+                            << " [Wake] 等待后续命令 wake_id="
+                            << job.wake_id << "\n" << std::flush;
+                    }
+                    continue;
                 }
-                if (apply_wake_text_filter) {
-                    WakeAsrTextFilterResult filtered = filterWakeAsrText(text);
+                if (cfg.wake_enabled && cfg.wake_strip_asr) {
+                    auto filtered = omni_agent::filterWakeAsrText(
+                        text, cfg.wake_phrases);
                     if (filtered.drop) {
                         std::cout << getTimestamp()
-                            << " [Wake] 丢弃唤醒词ASR: \"" << text << "\"\n";
-                        g_processing = false;
-                        std::cout << getTimestamp()
-                            << " [等待语音输入...]\n" << std::flush;
+                            << " [Wake] wake_id=" << job.wake_id
+                            << " 纯唤醒，丢弃ASR: \"" << text
+                            << "\" matched=\"" << filtered.matched_phrase << "\"\n";
+                        if (job.wake_id != 0 &&
+                                active_wake_session_id.load() == job.wake_id) {
+                            active_wake_deadline_ms.store(
+                                monotonicMs() + cfg.wake_command_timeout_ms);
+                        }
+                        finishRecognitionJob();
+                        if (job.wake_id != 0) {
+                            std::cout << getTimestamp()
+                                << " [Wake] 等待后续命令 wake_id=" << job.wake_id
+                                << "\n" << std::flush;
+                        } else {
+                            std::cout << getTimestamp()
+                                << " [等待语音输入...]\n" << std::flush;
+                        }
                         continue;
                     }
                     if (filtered.changed) {
                         std::cout << getTimestamp()
-                            << " [Wake] 过滤唤醒词ASR: \"" << text
-                            << "\" -> \"" << filtered.text << "\"\n";
+                            << " [Wake] wake_id=" << job.wake_id
+                            << " 清洗ASR: \"" << text
+                            << "\" -> \"" << filtered.text
+                            << "\" matched=\"" << filtered.matched_phrase << "\"\n";
                         text = filtered.text;
+                    } else if (job.wake_id != 0 &&
+                            omni_agent::shouldDropUnmatchedWakeAsr(
+                            job.contains_wake_event,
+                            job.post_wake_speech_frames)) {
+                        std::cout << getTimestamp()
+                            << " [Wake] wake_id=" << job.wake_id
+                            << " 首段ASR未命中词表，且HID后无连续近端语音，"
+                            << "按纯唤醒误转写丢弃: \"" << text << "\"\n";
+                        if (active_wake_session_id.load() == job.wake_id) {
+                            active_wake_deadline_ms.store(
+                                monotonicMs() + cfg.wake_command_timeout_ms);
+                        }
+                        finishRecognitionJob();
+                        std::cout << getTimestamp()
+                            << " [Wake] 等待后续命令 wake_id=" << job.wake_id
+                            << "\n" << std::flush;
+                        continue;
+                    } else if (job.wake_id != 0) {
+                        std::cout << getTimestamp() << " [Wake] wake_id="
+                            << job.wake_id
+                            << " ASR未包含唤醒词，按命令原样通过\n";
                     }
                 }
+                closeWakeSession(job.wake_id);
                 {
                     std::lock_guard<std::mutex> lock(g_process_thread_mutex);
                     if (g_process_thread && g_process_thread->joinable()) {
@@ -1251,10 +1401,17 @@ int main(int argc, char* argv[]) {
                         });
                 }
             } else {
-                wake_asr_filter_pending = false;
                 std::cout << getTimestamp() << " [ASR] 识别完成: (无结果)" << std::endl;
-                g_processing = false;
-                std::cout << getTimestamp() << " [等待语音输入...]\n" << std::flush;
+                finishRecognitionJob();
+                if (job.wake_id != 0 &&
+                        active_wake_session_id.load() == job.wake_id) {
+                    active_wake_deadline_ms.store(
+                        monotonicMs() + cfg.wake_command_timeout_ms);
+                    std::cout << getTimestamp() << " [Wake] 等待后续命令 wake_id="
+                        << job.wake_id << "\n" << std::flush;
+                } else {
+                    std::cout << getTimestamp() << " [等待语音输入...]\n" << std::flush;
+                }
             }
         }
     });
@@ -1336,30 +1493,15 @@ int main(int argc, char* argv[]) {
         if (samples_16k.empty()) return;
         if (!isCurrentCaptureGeneration(generation)) return;
 
-        if (cfg.wake_enabled && cfg.wake_interrupt_mode && cfg.wake_drop_asr) {
-            long long drop_until = wake_drop_until_ms.load();
-            if (drop_until > 0) {
-                long long now_ms = monotonicMs();
-                long long drop_start = wake_drop_start_ms.load();
-                long long elapsed_ms = drop_start > 0 ? now_ms - drop_start : 0;
-                bool loud_wake_audio = isLoudWakeAudio(samples_16k);
-                if ((drop_start > 0 && elapsed_ms < WAKE_HARD_DROP_MS) ||
-                        (loud_wake_audio && (now_ms < drop_until ||
-                            (drop_start > 0 && elapsed_ms < 1600)))) {
-                    resetWakeInputState();
-                    return;
-                }
-                wake_drop_until_ms.store(0);
-                wake_drop_start_ms.store(0);
-                resetWakeInputState();
-                wake_command_pending = true;
-                if (wake_ready_pending.exchange(false)) {
-                    std::cout << getTimestamp()
-                        << " [Wake] ready for command after "
-                        << elapsed_ms << "ms\n" << std::flush;
-                }
-            }
+        expireWakeSession();
+        const uint64_t consumed_wake_id = consumeWakeRequest();
+#ifdef USE_DOA
+        if (consumed_wake_id != 0 && doa_runtime.enabled()) {
+            doa_runtime.Reset();
         }
+#else
+        (void)consumed_wake_id;
+#endif
 
 #ifdef USE_AUDIO_FRONTEND
         if (audio_frontend) {
@@ -1413,59 +1555,13 @@ int main(int argc, char* argv[]) {
                 vad_prob = vad_result ? vad_result->GetProbability() : 0.0f;
             }
 
+            if (utterance_contains_wake_event &&
+                    vad_prob > cfg.vad_threshold) {
+                ++post_wake_speech_frames;
+            }
+
             // TTS 播放期间：检测 barge-in
             if (g_processing) {
-                if (cfg.wake_enabled && consumeWakeRequest()) {
-                    if (cfg.wake_interrupt_mode) {
-                        std::cout << "\n" << getTimestamp()
-                            << " [Wake] HID唤醒，中断TTS并播放提示音\n";
-                        g_barge_in = true;
-                        clearPlayback();
-                        playWakeAck();
-                        if (cfg.wake_drop_asr) {
-                            wake_ready_pending = true;
-                            wake_asr_filter_pending = true;
-                            long long now_ms = monotonicMs();
-                            wake_drop_start_ms.store(now_ms);
-                            wake_drop_until_ms.store(now_ms + wakeDropDurationMs());
-                        }
-#ifdef USE_DOA
-                        if (doa_runtime.enabled()) {
-                            doa_runtime.Reset();
-                        }
-#endif
-                        barge_in_confirm_frames = 0;
-                        resetWakeInputState();
-                        continue;
-                    }
-
-                    std::cout << "\n" << getTimestamp()
-                        << " [Wake] HID唤醒，停止播放\n";
-                    g_barge_in = true;
-                    clearPlayback();
-#ifdef USE_DOA
-                    if (doa_runtime.enabled()) {
-                        doa_runtime.Reset();
-                    }
-#endif
-                    barge_in_recording = true;
-                    barge_in_confirm_frames = 0;
-
-                    std::lock_guard<std::mutex> lock(buffer_mutex);
-                    is_speaking = true;
-                    vad_segment_max_prob = vad_prob;
-                    audio_buffer.clear();
-                    for (const auto& frame : pre_buffer) {
-                        audio_buffer.insert(audio_buffer.end(), frame.begin(), frame.end());
-                    }
-                    audio_buffer.insert(audio_buffer.end(), vad_frame.begin(), vad_frame.end());
-                    pre_buffer.clear();
-                    silence_frames_count = 0;
-                    vad_progress.Publish(vad_prob, cfg.vad_threshold,
-                        audio_buffer.size(), true, true);
-                    continue;
-                }
-
                 if (barge_in_recording && is_speaking) {
                     std::lock_guard<std::mutex> lock(buffer_mutex);
                     audio_buffer.insert(audio_buffer.end(), vad_frame.begin(), vad_frame.end());
@@ -1532,11 +1628,18 @@ int main(int argc, char* argv[]) {
 #endif
                     is_speaking = true;
                     audio_buffer.clear();
-
-                    if (wake_command_pending.exchange(false)) {
-                        appendPreBuffer(POST_WAKE_PRE_BUFFER_FRAMES);
-                    } else {
-                        appendPreBuffer(PRE_BUFFER_FRAMES);
+                    appendPreBuffer(PRE_BUFFER_FRAMES);
+                    if (utterance_wake_id == 0) {
+                        utterance_wake_id =
+                            active_wake_session_id.load(std::memory_order_acquire);
+                    }
+                    if (utterance_wake_id != 0 &&
+                            pending_initial_wake_segment_id.load(
+                                std::memory_order_acquire) == utterance_wake_id) {
+                        utterance_contains_wake_event = true;
+                        post_wake_speech_frames = 1;
+                        pending_initial_wake_segment_id.store(
+                            0, std::memory_order_release);
                     }
 
                     std::cout << "\n";
@@ -1554,7 +1657,8 @@ int main(int argc, char* argv[]) {
                 if (silence_frames_count >= silence_frames_threshold) {
                     is_speaking = false;
                     barge_in_recording = false;
-                    std::cout << "\r" << getTimestamp() << " [VAD] 停止说话，触发识别";
+                    std::cout << "\r" << getTimestamp()
+                        << " [VAD] 停止说话，触发识别";
                     std::cout << " max_prob=" << formatFloat(vad_segment_max_prob, 2)
                         << " threshold=" << formatFloat(cfg.vad_threshold, 2);
 #ifdef USE_DOA
@@ -1569,12 +1673,19 @@ int main(int argc, char* argv[]) {
                     std::cout << std::endl;
 
                     if (audio_buffer.size() > 8000) {
-                        wake_barge_in_request_ms.store(0);
-                        g_processing = true;
-                        enqueueRecognition(audio_buffer);
+                        enqueueRecognition({
+                            audio_buffer,
+                            utterance_wake_id,
+                            dialogue_generation.load(std::memory_order_acquire),
+                            utterance_contains_wake_event,
+                            post_wake_speech_frames,
+                        });
                     }
 
                     audio_buffer.clear();
+                    utterance_wake_id = 0;
+                    utterance_contains_wake_event = false;
+                    post_wake_speech_frames = 0;
                     silence_frames_count = 0;
                     vad_segment_max_prob = 0.0f;
                 }
@@ -1680,9 +1791,10 @@ int main(int argc, char* argv[]) {
     if (cfg.wake_enabled) {
         std::string wake_error;
         if (!wake_listener.Start(cfg.wake_device, [&]() {
-                if (g_processing) {
-                    wake_barge_in_request_ms.store(monotonicMs());
-                }
+                const uint64_t wake_id =
+                    wake_id_counter.fetch_add(1, std::memory_order_acq_rel) + 1;
+                dialogue_generation.fetch_add(1, std::memory_order_acq_rel);
+                pending_wake_id.store(wake_id, std::memory_order_release);
             }, &wake_error)) {
             std::cerr << getTimestamp() << " 错误: 无法启动 HID 唤醒: "
                 << wake_error << "\n";

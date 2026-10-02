@@ -86,13 +86,33 @@ const char* kVoiceChatConfigTemplate = R"({
     },
     "wake": {
         "enabled": false,
+        "source": "hid",
         "device": "/dev/hidraw0",
+        "kws": {
+            "model_dir": "~/.cache/models/kws/xiaojin-v1",
+            "threshold": 0.3,
+            "holdoff_ms": 1000,
+            "partial_threshold": 0.0,
+            "echo_null": false,
+            "echo_null_first_channel": 2
+        },
         "interrupt_mode": true,
         "ack_audio": "~/.cache/models/assets/audio/006_im_here.wav",
         "ack_audio_url": "https://archive.spacemit.com/spacemit-ai/model_zoo/assets/audio/006_im_here.wav",
-        "drop_wake_asr": true,
-        "drop_audio_ms": 500,
-        "post_ack_tail_ms": 0
+        "strip_from_asr": true,
+        "command_timeout_ms": 5000,
+        "phrases": [
+            {
+                "id": "xiaojin",
+                "canonical": "小进小进",
+                "asr_aliases": [
+                    "小金小金", "小静小静", "小晶小晶", "小鲸小鲸",
+                    "小新小新", "小鑫小鑫", "小近小近", "小劲小劲",
+                    "小丁小丁", "小姐小姐", "想金小金", "响金响金",
+                    "向金向金", "小心小心", "嗯", "Tentu", "Bien"
+                ]
+            }
+        ]
     },
     "debug": {
         "save_audio":      false,
@@ -100,7 +120,9 @@ const char* kVoiceChatConfigTemplate = R"({
         "save_asr_audio":      false,
         "save_asr_audio_file": "voice_asr_debug.wav",
         "save_tts_audio":      false,
-        "save_tts_audio_file": "tts_debug.wav"
+        "save_tts_audio_file": "tts_debug.wav",
+        "save_aec_dump": false,
+        "aec_dump_dir":  "~/.cache/omni_agent/aec_dumps"
     },
     "startup_greeting": "你好，请问有什么可以帮到您？",
     "log_dir":  "~/.cache/omni_agent/logs",
@@ -165,11 +187,17 @@ const char* kMcpConfigTemplate = R"({
 )";
 
 const char* kAecConfigTemplate = R"({
-    "no_aec":        false,
-    "no_ns":         false,
-    "agc":           false,
-    "aec_delay_ms":  50,
-    "buffer_frames": 0
+    "no_aec":         false,
+    "no_ns":          false,
+    "agc":            true,
+    "aec_delay_ms":   50,
+    "buffer_frames":  0,
+    "ns_level":       "moderate",
+    "fixed_gain_db":  0.0,
+    "speech_channel": 2,
+    "reference_channel": 0,
+    "reference_gain_db": 12.0,
+    "wake_echo_guard": "auto"
 }
 )";
 
@@ -278,13 +306,77 @@ void ParseWake(const json& j, WakeCfg& wake) {
     }
     const json& w = *it;
     GetOpt(w, "enabled", wake.enabled);
+    GetOpt(w, "source", wake.source);
     GetOpt(w, "device", wake.device);
+    auto kws = w.find("kws");
+    if (kws != w.end() && kws->is_object()) {
+        GetOpt(*kws, "model_dir", wake.kws.model_dir);
+        GetOpt(*kws, "threshold", wake.kws.threshold);
+        GetOpt(*kws, "holdoff_ms", wake.kws.holdoff_ms);
+        GetOpt(*kws, "partial_threshold", wake.kws.partial_threshold);
+        GetOpt(*kws, "echo_null", wake.kws.echo_null);
+        GetOpt(*kws, "echo_null_first_channel", wake.kws.echo_null_first_channel);
+    }
     GetOpt(w, "interrupt_mode", wake.interrupt_mode);
     GetOpt(w, "ack_audio", wake.ack_audio);
     GetOpt(w, "ack_audio_url", wake.ack_audio_url);
-    GetOpt(w, "drop_wake_asr", wake.drop_wake_asr);
-    GetOpt(w, "drop_audio_ms", wake.drop_audio_ms);
-    GetOpt(w, "post_ack_tail_ms", wake.post_ack_tail_ms);
+    if (w.contains("strip_from_asr")) {
+        GetOpt(w, "strip_from_asr", wake.strip_from_asr);
+    } else {
+        if (w.contains("drop_wake_asr")) {
+            GetOpt(w, "drop_wake_asr", wake.strip_from_asr);
+            wake.legacy_drop_wake_asr_configured = true;
+        }
+    }
+    GetOpt(w, "command_timeout_ms", wake.command_timeout_ms);
+    wake.legacy_audio_drop_configured =
+        w.contains("drop_audio_ms") || w.contains("post_ack_tail_ms");
+    GetOpt(w, "drop_audio_ms", wake.legacy_drop_audio_ms);
+    GetOpt(w, "post_ack_tail_ms", wake.legacy_post_ack_tail_ms);
+
+    auto phrases = w.find("phrases");
+    // null keeps the built-in defaults, like every other field.
+    if (phrases != w.end() && !phrases->is_null()) {
+        if (!phrases->is_array()) {
+            throw std::runtime_error("wake.phrases must be an array");
+        }
+        wake.phrases.clear();
+        for (const auto& item : *phrases) {
+            if (!item.is_object()) {
+                throw std::runtime_error("wake.phrases entries must be objects");
+            }
+            WakePhraseConfig phrase;
+            GetOpt(item, "id", phrase.id);
+            GetOpt(item, "canonical", phrase.canonical);
+            GetOpt(item, "asr_aliases", phrase.asr_aliases);
+            wake.phrases.push_back(std::move(phrase));
+        }
+    }
+
+    // The table is only forwarded to voice_chat while wake is enabled.
+    std::string phrase_error;
+    if (wake.enabled && wake.strip_from_asr &&
+            !validateWakePhrases(wake.phrases, &phrase_error)) {
+        throw std::runtime_error(phrase_error);
+    }
+    if (wake.command_timeout_ms <= 0) {
+        throw std::runtime_error("wake.command_timeout_ms must be positive");
+    }
+    if (wake.source != "kws" && wake.source != "hid") {
+        throw std::runtime_error("wake.source must be \"kws\" or \"hid\"");
+    }
+    if (!(wake.kws.threshold > 0.0f && wake.kws.threshold <= 1.0f)) {
+        throw std::runtime_error("wake.kws.threshold must be in (0, 1]");
+    }
+    if (!(wake.kws.partial_threshold >= 0.0f && wake.kws.partial_threshold <= 1.0f)) {
+        throw std::runtime_error("wake.kws.partial_threshold must be in [0, 1]");
+    }
+    if (wake.kws.holdoff_ms < 0) {
+        throw std::runtime_error("wake.kws.holdoff_ms must not be negative");
+    }
+    if (wake.kws.echo_null_first_channel < 1) {
+        throw std::runtime_error("wake.kws.echo_null_first_channel must be >= 1");
+    }
 }
 
 void ParseAsr(const json& j, AsrCfg& asr) {
@@ -342,6 +434,8 @@ void ParseVoiceChat(const json& j, DaemonConfig& cfg) {
         GetOpt(*it, "save_asr_audio_file", debug.save_asr_audio_file);
         GetOpt(*it, "save_tts_audio", debug.save_tts_audio);
         GetOpt(*it, "save_tts_audio_file", debug.save_tts_audio_file);
+        GetOpt(*it, "save_aec_dump", debug.save_aec_dump);
+        GetOpt(*it, "aec_dump_dir", debug.aec_dump_dir);
     }
     GetOpt(j, "startup_greeting", startup_greeting);
     GetOpt(j, "log_dir", log_dir);
@@ -426,6 +520,18 @@ void ParseAec(const json& j, DaemonConfig& cfg) {
     GetOpt(j, "agc", aec.agc);
     GetOpt(j, "aec_delay_ms", aec.aec_delay_ms);
     GetOpt(j, "buffer_frames", aec.buffer_frames);
+    GetOpt(j, "ns_level", aec.ns_level);
+    GetOpt(j, "fixed_gain_db", aec.fixed_gain_db);
+    GetOpt(j, "speech_channel", aec.speech_channel);
+    GetOpt(j, "reference_channel", aec.reference_channel);
+    GetOpt(j, "reference_gain_db", aec.reference_gain_db);
+    if (aec.reference_channel < 0) {
+        throw std::runtime_error("aec.reference_channel must be >= 0 (0 = software loopback)");
+    }
+    GetOpt(j, "wake_echo_guard", aec.wake_echo_guard);
+    if (aec.wake_echo_guard != "auto" && aec.wake_echo_guard != "on" && aec.wake_echo_guard != "off") {
+        throw std::runtime_error("aec.wake_echo_guard must be \"auto\", \"on\" or \"off\"");
+    }
     cfg.aec = aec;
 }
 
@@ -461,9 +567,11 @@ bool LoadJson(const std::string& path, LoadStatus& status, json& out) {
 
 void ExpandPathFields(DaemonConfig& cfg) {
     cfg.debug.save_audio_file = ExpandUser(cfg.debug.save_audio_file);
+    cfg.debug.aec_dump_dir = ExpandUser(cfg.debug.aec_dump_dir);
     cfg.debug.save_asr_audio_file = ExpandUser(cfg.debug.save_asr_audio_file);
     cfg.debug.save_tts_audio_file = ExpandUser(cfg.debug.save_tts_audio_file);
     cfg.wake.device = ExpandUser(cfg.wake.device);
+    cfg.wake.kws.model_dir = ExpandUser(cfg.wake.kws.model_dir);
     cfg.wake.ack_audio = ExpandUser(cfg.wake.ack_audio);
     cfg.asr.model_path = ExpandUser(cfg.asr.model_path);
     cfg.asr.smt_config_dir = ExpandUser(cfg.asr.smt_config_dir);
@@ -559,15 +667,32 @@ json VoiceChatJson(const DaemonConfig& cfg) {
         {"startup_timeout", cfg.asr.startup_timeout},
         {"extra_args", cfg.asr.extra_args},
     };
+    json wake_phrases = json::array();
+    for (const auto& phrase : cfg.wake.phrases) {
+        wake_phrases.push_back({
+            {"id", phrase.id},
+            {"canonical", phrase.canonical},
+            {"asr_aliases", phrase.asr_aliases},
+        });
+    }
     j["wake"] = {
         {"enabled", cfg.wake.enabled},
+        {"source", cfg.wake.source},
         {"device", cfg.wake.device},
+        {"kws", {
+            {"model_dir", cfg.wake.kws.model_dir},
+            {"threshold", cfg.wake.kws.threshold},
+            {"holdoff_ms", cfg.wake.kws.holdoff_ms},
+            {"partial_threshold", cfg.wake.kws.partial_threshold},
+            {"echo_null", cfg.wake.kws.echo_null},
+            {"echo_null_first_channel", cfg.wake.kws.echo_null_first_channel},
+        }},
         {"interrupt_mode", cfg.wake.interrupt_mode},
         {"ack_audio", cfg.wake.ack_audio},
         {"ack_audio_url", cfg.wake.ack_audio_url},
-        {"drop_wake_asr", cfg.wake.drop_wake_asr},
-        {"drop_audio_ms", cfg.wake.drop_audio_ms},
-        {"post_ack_tail_ms", cfg.wake.post_ack_tail_ms},
+        {"strip_from_asr", cfg.wake.strip_from_asr},
+        {"command_timeout_ms", cfg.wake.command_timeout_ms},
+        {"phrases", wake_phrases},
     };
     j["debug"] = {
         {"save_audio", cfg.debug.save_audio},
@@ -576,6 +701,8 @@ json VoiceChatJson(const DaemonConfig& cfg) {
         {"save_asr_audio_file", cfg.debug.save_asr_audio_file},
         {"save_tts_audio", cfg.debug.save_tts_audio},
         {"save_tts_audio_file", cfg.debug.save_tts_audio_file},
+        {"save_aec_dump", cfg.debug.save_aec_dump},
+        {"aec_dump_dir", cfg.debug.aec_dump_dir},
     };
     j["startup_greeting"] = cfg.startup_greeting;
     j["log_dir"] = cfg.log_dir;

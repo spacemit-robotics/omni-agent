@@ -58,12 +58,6 @@ struct AudioClip {
     int sample_rate = 0;
 };
 
-struct WakeAsrTextFilterResult {
-    std::string text;
-    bool changed = false;
-    bool drop = false;
-};
-
 struct AsrAudioPreprocessStats {
     float input_rms = 0.0f;
     float active_rms = 0.0f;
@@ -76,9 +70,12 @@ struct AsrAudioPreprocessStats {
 std::vector<float> pcm16BytesToFloat(const std::vector<uint8_t>& bytes);
 std::vector<int16_t> floatToPcm16(const std::vector<float>& samples);
 std::string expandUserPath(const std::string& path);
-WakeAsrTextFilterResult filterWakeAsrText(const std::string& text);
 AsrAudioPreprocessStats preprocessAsrAudio(std::vector<float>* samples);
 bool loadWavMonoFloat(const std::string& filename, AudioClip* clip, std::string* error);
+// Drops the digital silence after the last sample above threshold_dbfs, keeping keep_ms
+// of natural decay. A clip that never crosses the threshold is left untouched.
+// Returns the number of samples removed.
+size_t trimTrailingSilence(AudioClip* clip, float threshold_dbfs, int keep_ms);
 void saveWav(const std::string& filename, const std::vector<int16_t>& data, int sample_rate);
 
 #endif  // VOICE_COMMON_HPP

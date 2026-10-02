@@ -1,0 +1,20 @@
+module: application/native/omni_agent
+
+tests:
+  - name: omni-agent-wake-config-contract
+    description: Verifies configurable wake phrases, ASR prefix stripping, and legacy config compatibility.
+    category: functional
+    scopes: [pr]
+    timeout_s: 120
+    workdir: sdk
+    command: |
+      bash application/native/omni_agent/tests/test_wake_config_contract.sh
+
+  - name: omni-agent-echo-null
+    description: Verifies the KWS loudspeaker null attenuates playback, keeps the talker, and relearns after the speaker moves.
+    category: functional
+    scopes: [pr]
+    timeout_s: 120
+    workdir: sdk
+    command: |
+      bash application/native/omni_agent/tests/test_echo_null.sh

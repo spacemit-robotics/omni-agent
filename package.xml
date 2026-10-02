@@ -8,6 +8,7 @@
   <depend>asr</depend>
   <depend>tts</depend>
   <depend>vad</depend>
+  <depend>kws</depend>
   <depend>llm</depend>
   <!-- webrtc-audio-processing: fetched when USE_AEC or USE_AUDIO_FRONTEND is enabled. -->
   <depend>mcp</depend>
