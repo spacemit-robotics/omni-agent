@@ -441,9 +441,15 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
     }
 
     // Clean up buffers
-    if (!g_barge_in) {
+    bool interrupted = g_barge_in;
+    if (!interrupted) {
         resetInputState(ctx);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // A wake during the wait owns the audio that follows it: flushing now would
+        // drop the start of the user's command.
+        interrupted = g_barge_in;
+    }
+    if (!interrupted) {
         if (ctx.flush_pending_capture) {
             ctx.flush_pending_capture();
         }

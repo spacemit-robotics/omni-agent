@@ -92,6 +92,7 @@ option(USE_AEC "Enable WebRTC AEC (Acoustic Echo Cancellation) for barge-in supp
 option(USE_AUDIO_FRONTEND "Enable WebRTC audio frontend (AGC/NS/HPF) for voice_chat" OFF)
 option(USE_VP "Enable Voiceprint (speaker identification) support" ON)
 option(USE_DOA "Enable DOA (Direction of Arrival) support" ON)
+option(USE_KWS "Enable on-device keyword wake (components/model_zoo/kws) in voice_chat_aec" ON)
 
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -130,6 +131,19 @@ else()
     message(STATUS "kaldifst libraries not found; assuming libtts.a was built with TTS_USE_FST=OFF")
 endif()
 
+# libtts.a may carry the MOSS backend, which needs sentencepiece (a static lib bundling its
+# own protobuf-lite). Link it hidden so its symbols cannot interpose libonnxruntime's
+# protobuf (otherwise Silero VAD fails with "Protobuf parsing failed").
+find_library(SENTENCEPIECE_LIB NAMES sentencepiece)
+set(TTS_EXTRA_LIBS "")
+if(SENTENCEPIECE_LIB)
+    message(STATUS "sentencepiece found for the libtts MOSS backend: ${SENTENCEPIECE_LIB}")
+    list(APPEND TTS_EXTRA_LIBS ${SENTENCEPIECE_LIB})
+    if(NOT APPLE)
+        list(APPEND TTS_EXTRA_LIBS "-Wl,--exclude-libs,libsentencepiece.a")
+    endif()
+endif()
+
 # vad
 find_library(VAD_LIB NAMES vad REQUIRED)
 find_library(SILERO_VAD_LIB NAMES silero_vad REQUIRED)
@@ -166,6 +180,13 @@ if(USE_VP)
     message(STATUS "Voiceprint support enabled")
 endif()
 
+# kws
+if(USE_AEC AND USE_KWS)
+    find_library(KWS_LIB NAMES kws REQUIRED)
+    find_path(KWS_INCLUDE_DIR NAMES kws_service.h REQUIRED)
+    message(STATUS "KWS wake support enabled")
+endif()
+
 # ============================================================================
 # WebRTC Audio Processing for AEC / voice_chat audio frontend
 # ============================================================================
@@ -187,6 +208,7 @@ endif()
 # ============================================================================
 set(VOICE_AGENT_COMMON_SOURCES
     src/voice_common.cpp
+    src/wake_text_filter.cpp
     src/mcp_helper.cpp
     src/engine_init.cpp
     src/hid_wake_listener.cpp
@@ -251,6 +273,7 @@ if(USE_AEC)
     add_executable(voice_chat_aec
         examples/voice_chat_aec.cpp
         src/aec_duplex_processor.cpp
+        src/echo_null_beamformer.cpp
         ${VOICE_AGENT_COMMON_SOURCES}
     )
 
@@ -265,6 +288,7 @@ if(USE_AEC)
     target_link_libraries(voice_chat_aec
         ${VOICE_AGENT_LIBS}
         ${WEBRTC_LIB}
+        ${TTS_EXTRA_LIBS}
     )
 
     target_link_directories(voice_chat_aec PRIVATE ${VOICE_AGENT_LINK_DIRS})
@@ -316,7 +340,61 @@ if(USE_AEC)
         message(STATUS "  + DOA support enabled for voice_chat_aec")
     endif()
 
+    if(USE_KWS)
+        target_sources(voice_chat_aec PRIVATE src/kws_wake_listener.cpp)
+        target_compile_definitions(voice_chat_aec PRIVATE USE_KWS)
+        target_include_directories(voice_chat_aec PRIVATE ${KWS_INCLUDE_DIR})
+        target_link_libraries(voice_chat_aec ${KWS_LIB})
+        message(STATUS "  + KWS wake support enabled for voice_chat_aec")
+    endif()
+
     install(TARGETS voice_chat_aec RUNTIME DESTINATION bin)
+
+    # aec_echo_capture: play WAVs through the same AEC duplex path and dump aligned tracks
+    add_executable(aec_echo_capture
+        examples/aec_echo_capture.cpp
+        src/aec_duplex_processor.cpp
+        src/echo_null_beamformer.cpp
+        src/voice_common.cpp
+    )
+    target_compile_definitions(aec_echo_capture PRIVATE USE_AEC)
+    add_dependencies(aec_echo_capture webrtc_ap_ep)
+    target_include_directories(aec_echo_capture PRIVATE
+        ${VOICE_AGENT_INCLUDE_DIRS}
+        ${WEBRTC_INCLUDE_DIRS}
+    )
+    target_link_libraries(aec_echo_capture
+        ${SPACEMIT_AUDIO_LIB}
+        ${AUDIO_RESAMPLER_LIB}
+        ${SAMPLERATE_LIBRARIES}
+        ${PORTAUDIO_LIBRARIES}
+        ${SNDFILE_LIBRARIES}
+        ${WEBRTC_LIB}
+        pthread
+        m
+    )
+    target_link_directories(aec_echo_capture PRIVATE ${VOICE_AGENT_LINK_DIRS})
+    set_target_properties(aec_echo_capture PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+        INSTALL_RPATH "$ORIGIN/../lib"
+        BUILD_WITH_INSTALL_RPATH TRUE
+    )
+    install(TARGETS aec_echo_capture RUNTIME DESTINATION bin)
+
+    # echo_null_replay: run the KWS-path loudspeaker null offline on aec_dump_raw/ref.wav
+    add_executable(echo_null_replay
+        examples/echo_null_replay.cpp
+        src/echo_null_beamformer.cpp
+    )
+    target_include_directories(echo_null_replay PRIVATE ${VOICE_AGENT_INCLUDE_DIRS})
+    target_link_libraries(echo_null_replay ${SNDFILE_LIBRARIES} m)
+    target_link_directories(echo_null_replay PRIVATE ${VOICE_AGENT_LINK_DIRS})
+    set_target_properties(echo_null_replay PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+        INSTALL_RPATH "$ORIGIN/../lib"
+        BUILD_WITH_INSTALL_RPATH TRUE
+    )
+    install(TARGETS echo_null_replay RUNTIME DESTINATION bin)
 endif()
 
 # ============================================================================
@@ -335,7 +413,7 @@ add_executable(voice_chat ${VOICE_CHAT_SOURCES})
 
 target_include_directories(voice_chat PRIVATE ${VOICE_AGENT_INCLUDE_DIRS})
 
-target_link_libraries(voice_chat ${VOICE_AGENT_LIBS})
+target_link_libraries(voice_chat ${VOICE_AGENT_LIBS} ${TTS_EXTRA_LIBS})
 
 target_link_directories(voice_chat PRIVATE ${VOICE_AGENT_LINK_DIRS})
 
@@ -410,10 +488,12 @@ endif()
 add_executable(voice_chat_daemon
     examples/voice_chat_daemon.cpp
     src/daemon_config.cpp
+    src/wake_text_filter.cpp
 )
 
 target_include_directories(voice_chat_daemon PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${AUDIO_INCLUDE_DIR}
     ${CURL_INCLUDE_DIRS}
     ${PORTAUDIO_INCLUDE_DIRS}

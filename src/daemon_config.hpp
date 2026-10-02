@@ -11,6 +11,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "wake_text_filter.hpp"
+
 namespace omni_agent {
 
 struct AudioCfg {
@@ -90,11 +92,31 @@ struct AsrCfg {
     std::vector<std::string> extra_args;
 };
 
+struct KwsWakeCfg {
+    // 模型目录；空字符串表示 KWS_MODEL_DIR 或 ~/.cache/models/kws/xiaojin-v1。
+    std::string model_dir;
+    // 关键词得分阈值，(0, 1]。
+    float threshold = 0.3f;
+    // 两次唤醒的最小间隔，单位毫秒。
+    int holdoff_ms = 1000;
+    // 快读时只解出半个唤醒词（"小进"）的接受阈值，[0, 1]；0 关闭。
+    float partial_threshold = 0.0f;
+    // 送 KWS 前先用 3 路裸麦在线学习扬声器零陷（只影响 KWS 这一路，ASR 不变；仅 16 kHz）。
+    bool echo_null = false;
+    // 零陷用的第一路裸麦（1 起，连续 3 路）；SPV 为 ch2~ch4。
+    int echo_null_first_channel = 2;
+};
+
 struct WakeCfg {
-    // 是否启用 HID 唤醒打断。
+    // 是否启用唤醒打断。
     bool enabled = false;
-    // hidraw 设备路径。
+    // 唤醒来源："hid" 为 SPV 板端 hidraw 上报（默认，兼容未写 source 的旧配置），
+    // "kws" 为本机 KWS 模型（仅 voice_chat_aec，需 -DUSE_KWS=ON 编译）。
+    std::string source = "hid";
+    // source=hid 时的 hidraw 设备路径。
     std::string device = "/dev/hidraw0";
+    // source=kws 时的模型参数。
+    KwsWakeCfg kws;
     // TTS 播放中收到唤醒时只中断并播放提示音，不把唤醒词送入 ASR/LLM。
     bool interrupt_mode = true;
     // 唤醒打断后播放的提示音。
@@ -102,12 +124,17 @@ struct WakeCfg {
     // 默认唤醒提示音缺失时的下载地址；空字符串表示不自动下载。
     std::string ack_audio_url =
         "https://archive.spacemit.com/spacemit-ai/model_zoo/assets/audio/006_im_here.wav";
-    // 是否丢弃唤醒词对应的 ASR 输入。
-    bool drop_wake_asr = true;
-    // 唤醒后丢弃录音输入的最大保护窗口，低能量命令可提前放行，单位毫秒。
-    int drop_audio_ms = 500;
-    // 提示音播放完成后继续丢弃录音输入的时长，单位毫秒。
-    int post_ack_tail_ms = 0;
+    // 唤醒开启时，从每条识别结果的句首清除唤醒词（重复出现的一并清除）；纯唤醒词不送入 LLM。
+    bool strip_from_asr = true;
+    // 规范唤醒词及 ASR 常见误识别。
+    std::vector<WakePhraseConfig> phrases = defaultWakePhrases();
+    // 纯唤醒词后继续等待下一条命令的窗口，单位毫秒。
+    int command_timeout_ms = 5000;
+    // 旧配置兼容字段；连续采集模式会忽略非零值并打印警告。
+    bool legacy_drop_wake_asr_configured = false;
+    bool legacy_audio_drop_configured = false;
+    int legacy_drop_audio_ms = 0;
+    int legacy_post_ack_tail_ms = 0;
 };
 
 struct DebugCfg {
@@ -123,6 +150,11 @@ struct DebugCfg {
     bool save_tts_audio = false;
     // 保存 TTS 输出音频的路径。
     std::string save_tts_audio_file = "tts_debug.wav";
+    // 是否保存逐帧对齐的 AEC 调试音频（麦克风原始 / 扬声器参考 / ASR 输入 / KWS 输入），
+    // 仅 voice_chat_aec 模式生效；SPV 4 声道约 290 KB/s（每小时约 1 GB），只用于测试。
+    bool save_aec_dump = false;
+    // AEC 调试音频根目录；每次启动在其下建一个与日志同名时间戳的子目录。
+    std::string aec_dump_dir = "~/.cache/omni_agent/aec_dumps";
 };
 
 struct LlmCfg {
@@ -203,6 +235,20 @@ struct AecCfg {
     int aec_delay_ms = 50;
     // AEC buffer frames；0 表示使用 voice_chat_aec 默认值。
     int buffer_frames = 0;
+    // WebRTC NS 等级：low|moderate|high|veryhigh；空串表示用 voice_chat_aec 的默认。
+    std::string ns_level;
+    // NS 之后的固定补偿增益 (dB)，限幅器保护；0 表示不加。
+    float fixed_gain_db = 0.0f;
+    // AEC 模式下送入前端的录音声道（1-based）；0 表示沿用 audio.speech_channel。
+    // 软件 AEC 要在原始麦上工作，本机是 ch2；固件处理过的 ch1 已被门控，不适合。
+    int speech_channel = 2;
+    // AEC3 参考取哪一路采集（1-based）；0 表示软件回采（写给喇叭的样本）。
+    // SPV 2026-09-28 起的固件把 ch1 改成了硬件回采，与麦同时钟，AEC 线性滤波才能收敛。
+    int reference_channel = 0;
+    // 硬件回采送入 AEC 前的增益 (dB)；该固件的回采比麦低约 12 dB。
+    float reference_gain_db = 12.0f;
+    // 唤醒后是否丢弃提示音回声期间的音频：auto（硬件回采参考时不丢）| on | off。
+    std::string wake_echo_guard = "auto";
 };
 
 struct DoaCfg {
