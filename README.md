@@ -193,8 +193,10 @@ voice_chat_daemon restart
   与模型训练数据一致；TTS 播放期间也能唤醒。参数在 `wake.kws`：`model_dir`（默认
   `~/.cache/models/kws/xiaojin-v1`）、`threshold`（默认 0.3）、`holdoff_ms`（两次唤醒最小间隔，默认 1000）、`partial_threshold`
   （快读或 TTS 播放中只解出半个唤醒词"小进"时的接受阈值，默认 0 关闭；0.9 时 ft05 的小姐/小杰误唤醒与关闭时相同）。
-  `USE_AEC=ON` 时默认编入（`USE_KWS` 默认 ON，`kws` 组件经 `package.xml` 依赖先行构建）；模型发布包
-  `xiaojin-v1` 的下载方式见 `components/model_zoo/kws` README 2.2，缺模型时 KWS 唤醒启动失败并报错。
+  `USE_AEC=ON` 时默认编入（`USE_KWS` 默认 ON，`kws` 组件经 `package.xml` 依赖先行构建）。`model_dir` 用默认目录时，
+  首次启动由 kws（1.1.0 起）自动下载模型发布包 `xiaojin-v1` 并校验 SHA256，需要 `curl` 和网络，下载期间启动会等待
+  （离线约 11 s 后失败）；`KWS_MODEL_DOWNLOAD=0` 关闭自动下载。其他目录须先放好模型，见 `components/model_zoo/kws`
+  README 2.2。模型下载或加载失败时 `voice_chat_aec` 报错退出。
 
   `wake.kws.echo_null`（默认 false）打开 KWS 这一路的扬声器零陷：用 3 路裸麦（从 `echo_null_first_channel`
   起连续 3 路，1 起，默认 2 即 SPV 的第 2~4 路）按频点做空间滤波，把机器人自己喇叭方向的声音压掉后直接送 KWS
