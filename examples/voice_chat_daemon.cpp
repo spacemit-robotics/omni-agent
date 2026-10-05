@@ -912,6 +912,7 @@ bool WriteMcpResolvedConfig(const DaemonConfig& cfg, std::string& out_path) {
         j["registry_url"] = cfg.mcp.registry_url;
         j["registry_poll_interval"] = cfg.mcp.registry_poll_interval;
     }
+    j["pre_tool_speech"] = cfg.mcp.pre_tool_speech;
     j["servers"] = ResolveMcpServers(cfg.mcp.servers);
 
     std::ofstream f(out_path, std::ios::trunc);
@@ -1754,6 +1755,10 @@ int CmdStart(int argc, char** argv) {
     if (cfg.llm.reasoning_budget >= 0) {
         vc_args.push_back("--reasoning-budget");
         vc_args.push_back(std::to_string(cfg.llm.reasoning_budget));
+    }
+    if (!cfg.llm.extra_body.empty()) {
+        vc_args.push_back("--llm-extra-body");
+        vc_args.push_back(cfg.llm.extra_body.dump());
     }
     if (!cfg.startup_greeting.empty()) {
         vc_args.push_back("--startup-greeting");

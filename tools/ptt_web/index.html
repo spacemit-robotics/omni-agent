@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="referrer" content="no-referrer">
+<title>和机器人说话</title>
+<style>
+  html, body { height: 100%; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; padding: 24px 20px;
+         box-sizing: border-box; text-align: center; background: #f5f6f8; color: #222;
+         -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+  h1 { font-size: 22px; margin: 4px 0 6px; }
+  #hint { font-size: 14px; color: #666; margin-bottom: 20px; }
+  button { font-size: 20px; border: 0; border-radius: 16px; padding: 18px 28px; color: #fff; background: #1a73e8; }
+  #talk { width: 200px; height: 200px; border-radius: 50%; font-size: 24px; touch-action: none;
+          -webkit-touch-callout: none; transition: transform .1s, background .1s; }
+  #talk.rec { background: #d93025; transform: scale(1.08); }
+  #talk:disabled { background: #9aa0a6; }
+  #status { margin: 22px 0 14px; font-size: 17px; min-height: 26px; }
+  #turn { max-width: 440px; margin: 0 auto; text-align: left; font-size: 16px; line-height: 1.6; }
+  #turn div { background: #fff; border-radius: 12px; padding: 10px 14px; margin: 8px 0; white-space: pre-wrap; }
+  #turn .robot { background: #e8f0fe; }
+  #turn .action { background: #fef7e0; font-size: 14px; }
+  #turn:empty { display: none; }
+</style>
+</head>
+<body>
+<h1>和机器人说话</h1>
+<div id="hint">按住按钮说话，松手发送。说“停下”可以让它停止动作。</div>
+<button id="enable">点这里开始</button>
+<button id="talk" hidden>按住说话</button>
+<div id="status"></div>
+<div id="turn"></div>
+<script src="app.js"></script>
+</body>
+</html>

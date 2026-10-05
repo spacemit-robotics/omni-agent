@@ -33,8 +33,12 @@ public:
     // Stop buffer processing
     void stop();
 
+    // Queue the unfinished tail as a sentence; unlike stop(), more text can still be added
+    void flush();
+
 private:
     void processBuffer();
+    void flushLocked();
     bool isEndOfSentence(char c) const;
 
     std::string buffer_;

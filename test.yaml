@@ -18,3 +18,12 @@ tests:
     workdir: sdk
     command: |
       bash application/native/omni_agent/tests/test_echo_null.sh
+
+  - name: omni-agent-tool-speech
+    description: Verifies listed MCP tools wait until the pre-tool line has played, with fallback line, barge-in skip, and parsing of mcp.json pre_tool_speech and llm.json extra_body.
+    category: functional
+    scopes: [pr]
+    timeout_s: 120
+    workdir: sdk
+    command: |
+      bash application/native/omni_agent/tests/test_tool_speech.sh

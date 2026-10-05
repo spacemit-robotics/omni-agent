@@ -185,6 +185,8 @@ struct LlmCfg {
     int reasoning_budget = 0;
     // 追加给 llama-server 的原始参数。
     std::vector<std::string> extra_args;
+    // 合并进每个 LLM 请求体的字段，用于服务商专有参数，如 DeepSeek 关闭推理 {"thinking": {"type": "disabled"}}。
+    nlohmann::json extra_body = nlohmann::json::object();
     // 传给 voice_chat 的最大生成 token 数。
     int max_tokens = 150;
     // 默认系统提示词；mcp.json 中 system_prompt 非 null 时可覆盖。
@@ -220,6 +222,8 @@ struct McpCfg {
     std::string registry_url;
     // MCP registry 轮询间隔秒数。
     int registry_poll_interval = 5;
+    // 工具名 → 兜底播报：列出的工具先把话播完再调用，模型没说话时播这一句。
+    nlohmann::json pre_tool_speech = nlohmann::json::object();
     // MCP servers 原样透传，保留 stdio/http/socket 的类型差异。
     nlohmann::json servers = nlohmann::json::array();
 };

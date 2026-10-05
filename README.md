@@ -138,6 +138,27 @@ python3 -m venv ~/.mcp-env
 }
 ```
 
+让会动设备的工具“先说再动”（`pre_tool_speech`，工具名 → 兜底播报）：
+
+```json
+{
+    "enabled": true,
+    "pre_tool_speech": {
+        "perform_action": "好的，请注意安全。"
+    },
+    "servers": [
+        {
+            "name": "LingLong",
+            "type": "stdio",
+            "command": "humanoid_operator_mcp",
+            "args": ["--robot", "linglong"]
+        }
+    ]
+}
+```
+
+列出的工具调用前，先把模型这一轮的话播完；模型只给了工具调用、没有说话时，播这里配置的兜底句（配空字符串则不播）。播放结束后才调用工具；播放期间被唤醒词或 barge-in 打断时不调用，并在对话里记为“用户打断了，没有执行”。没列出的工具照旧立即调用，停止类工具（如 `stop_action`）不要列进来。
+
 使用云端 OpenAI-compatible LLM：
 
 ```bash
@@ -153,9 +174,12 @@ DeepSeek 示例：
 {
     "api_base": "https://api.deepseek.com",
     "api_key": "sk-...",
-    "model_name": "deepseek-v4-flash"
+    "model_name": "deepseek-v4-flash",
+    "extra_body": {"thinking": {"type": "disabled"}}
 }
 ```
+
+`extra_body` 会原样合并进每个 LLM 请求体，用于服务商专有参数（daemon 通过 `--llm-extra-body` 传给 `voice_chat`）。DeepSeek V4 默认开启推理，推理 token 计入 `max_tokens`：默认 150 时上下文稍复杂就会被推理用完，回复为空。语音场景建议像上面这样关闭推理；保留推理时把 `max_tokens` 调到 1024 以上。
 
 注册并启用声纹验证：
 
@@ -383,6 +407,54 @@ voice_chat_aec --llm-url http://127.0.0.1:9191/v1 --sample-rate 48000
 | `AEC3_CFG` | 空 | 覆盖 WebRTC AEC3 参数，`key=value` 逗号分隔（`filter_len`、`init_len`、`default_delay` 等，见 `src/aec_duplex_processor.cpp`） |
 | `AEC_DUMP_DIR` | 空 | 未配置 `debug.aec_dump_dir` 时的测试录音目录 |
 | `AEC_DIAG` | 未设置 | 设置后每 2 s 打印一次队列深度、丢帧、每帧耗时和参考延迟 |
+
+### text_chat
+
+文字输入调试：和 `voice_chat` 走同一个对话流程（LLM → 分句 TTS → MCP 工具），用 stdin 代替麦克风和 ASR，用按音频时长计时的假播放器代替声卡，每轮合成的语音存成 wav。不占用音频设备，适合调 prompt、MCP 工具和“先说再动”的时序。
+
+```bash
+export OPENAI_API_KEY=...
+text_chat --llm-url https://api.deepseek.com/v1 --model deepseek-flash \
+    --mcp-config mcp.json --out-dir /tmp/text_chat
+> 跟大家打个招呼
+> /barge 1500 来个奥特曼光线    # 开始处理 1.5 s 后模拟用户打断
+> /quit
+```
+
+`--mcp-config` 读的是 `voice_chat` 的 MCP 配置格式（daemon 生成的 `mcp_resolved.json` 就是这种），其中不支持 `null` 值。`--max-tokens` 默认 150，与 daemon 默认一致。
+
+### ptt_chat 与按住说话网页
+
+`ptt_chat` 不开麦克风，录音由外部提供：stdin 收 `wav <path>`，ASR 识别后走同一个对话流程，用本机扬声器播放。适合展会等嘈杂场合，用手机按住说话代替麦克风阵列和 AEC。
+
+```text
+手机网页 ──HTTPS──> 反向代理 ──> tools/ptt_web/ptt_server.py ──stdin──> ptt_chat ──> 扬声器 / MCP
+```
+
+| stdin 命令 | 作用 |
+|------------|------|
+| `wav <path>` | 识别并回答这段录音（16 位 PCM wav，任意采样率和声道数，内部转成 16 kHz 单声道） |
+| `text <文字>` | 跳过识别直接回答 |
+| `interrupt` | 停止播放，取消正在进行的回答（还没开始的动作不再执行），丢掉还没处理的录音 |
+| `reset` | 清空对话记忆，当前回答结束后生效 |
+| `quit` | 退出 |
+
+事件（识别结果、回答文字、工具结果、状态）写到 `--event-fd`，每行一个 JSON，格式见 `examples/ptt_chat.cpp` 开头。`-o none` 用假播放器，不出声。
+
+`tools/ptt_web/ptt_server.py`（只依赖 Python 标准库）提供网页并管理 `ptt_chat` 子进程：
+
+```bash
+export OPENAI_API_KEY=...
+python3 tools/ptt_web/ptt_server.py --listen 127.0.0.1:18080 --chat-log /tmp/ptt_chat.log -- \
+    ptt_chat --llm-url https://api.deepseek.com/v1 --model deepseek-flash --mcp-config mcp.json \
+    --llm-extra-body '{"thinking":{"type":"disabled"}}' -o "SPV Composite" --playback-rate 16000 --playback-channels 2
+```
+
+- 页面和接口都在 `/<token>/` 下，其他路径 404。token 存在 `--token-file`（默认 `~/.config/ptt_web/token`，不存在时生成）；扫码地址即 `https://<域名>/<token>/`。
+- 手机浏览器只在 HTTPS 下允许录音，本服务只监听本机，HTTPS 由前面的反向代理提供。
+- 一次只让一个人按住说话；按下即打断机器人。机器人回答某个人时，别人要等它说完（60 s 后不再保护）。
+- 录音只保留最近 20 段，放在 `--upload-dir`（默认 `$XDG_RUNTIME_DIR/ptt_web`）。
+- `--idle-reset <秒>` 空闲后清空对话记忆，避免上一位观众的对话带到下一位；默认不清。
 
 ### 声纹工具
 

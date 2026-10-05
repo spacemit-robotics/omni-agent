@@ -9,6 +9,7 @@
 #include <atomic>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -57,6 +58,8 @@ struct VoicePipelineContext {
     std::vector<spacemit_llm::ChatMessage>* conversation_messages = nullptr;
     std::mutex* conversation_mutex = nullptr;
     bool mcp_enabled = false;
+    // 工具名 → 兜底播报。列出的工具先把这一轮的话播完（模型没说话就播兜底句）再调用。
+    std::map<std::string, std::string> pre_tool_speech;
 #endif
 };
 

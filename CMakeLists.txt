@@ -214,6 +214,7 @@ set(VOICE_AGENT_COMMON_SOURCES
     src/hid_wake_listener.cpp
     src/voice_pipeline.cpp
     src/text_buffer.cpp
+    src/tool_speech.cpp
     src/llm_health.cpp
 )
 
@@ -481,6 +482,44 @@ if(USE_AEC OR USE_AUDIO_FRONTEND)
         libwebrtc-audio-processing-2.so.1
         \$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/lib/libwebrtc-audio-processing-2.so)")
 endif()
+
+# ============================================================================
+# text_chat - stdin text instead of mic/ASR, timed fake playback, wav per turn
+# ptt_chat  - push-to-talk: recorded wav from stdin commands -> ASR -> speaker
+# ============================================================================
+foreach(_chat text_chat ptt_chat)
+    add_executable(${_chat} examples/${_chat}.cpp ${VOICE_AGENT_COMMON_SOURCES})
+    target_include_directories(${_chat} PRIVATE ${VOICE_AGENT_INCLUDE_DIRS})
+    target_link_libraries(${_chat} ${VOICE_AGENT_LIBS} ${TTS_EXTRA_LIBS})
+    target_link_directories(${_chat} PRIVATE ${VOICE_AGENT_LINK_DIRS})
+    if(nlohmann_json_FOUND)
+        target_link_libraries(${_chat} nlohmann_json::nlohmann_json)
+    elseif(NLOHMANN_JSON_INCLUDE_DIR)
+        target_include_directories(${_chat} PRIVATE ${NLOHMANN_JSON_INCLUDE_DIR})
+    endif()
+    set_target_properties(${_chat} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    if(APPLE)
+        set_target_properties(${_chat} PROPERTIES
+            INSTALL_RPATH "@executable_path/../lib"
+            BUILD_WITH_INSTALL_RPATH TRUE
+        )
+    else()
+        set_target_properties(${_chat} PROPERTIES
+            INSTALL_RPATH "$ORIGIN/../lib"
+            BUILD_WITH_INSTALL_RPATH TRUE
+        )
+    endif()
+    if(USE_MCP)
+        target_compile_definitions(${_chat} PRIVATE USE_MCP)
+        target_include_directories(${_chat} PRIVATE ${MCP_INCLUDE_DIR})
+        target_link_libraries(${_chat} ${MCP_LIB})
+    endif()
+    if(USE_DOA)
+        target_compile_definitions(${_chat} PRIVATE USE_DOA)
+    endif()
+    install(TARGETS ${_chat} RUNTIME DESTINATION bin)
+endforeach()
+message(STATUS "Building text_chat (text input, fake playback) and ptt_chat (push-to-talk)")
 
 # ============================================================================
 # voice_chat_daemon - "傻瓜化" launcher (manages llama-server + voice_chat)

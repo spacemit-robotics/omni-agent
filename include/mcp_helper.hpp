@@ -8,6 +8,7 @@
 
 #ifdef USE_MCP
 
+#include <map>
 #include <string>
 #include <vector>
 #include <mcp_service.hpp>
@@ -20,6 +21,8 @@ struct MCPConfig {
     std::string system_prompt = "你是一个智能助手，可以使用工具帮助用户。请用中文回复。";
     std::string registry_url = "";
     int registry_poll_interval = 5;
+    // 工具名 → 兜底播报：列出的工具先播完这一轮的话再调用，模型没说话时播这一句（可为空）。
+    std::map<std::string, std::string> pre_tool_speech;
 
     struct ServerEntry {
         std::string name;
