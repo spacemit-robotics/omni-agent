@@ -5,7 +5,8 @@
 #
 """按住说话网页：手机按住按钮录音，松手上传，交给 ptt_chat 识别、回答并用本机扬声器播放。
 
-    ptt_server.py [--listen 127.0.0.1:18080] [--token-file F] [--tls-cert C --tls-key K] -- ptt_chat ...
+    ptt_server.py [--listen 127.0.0.1:18080] [--token-file F] [--tls-cert C --tls-key K]
+                  [--redirect-listen [::]:8442 --redirect-to URL] -- ptt_chat ...
 
 页面和接口都在 /<token>/ 下，其他路径一律 404。一次只让一个人说；机器人回答某个人时，别人要等它说完。
 手机浏览器只在 HTTPS 下允许录音：给了 --tls-cert/--tls-key 时本服务直接提供 HTTPS（例如在局域网监听），
@@ -189,7 +190,8 @@ class Robot:
                     "turn": view, "max_hold_s": self.max_hold_s}
 
     def stop(self):
-        self._send("quit")
+        if self.proc.poll() is None:  # 已经退出时再写 quit 只会在退出清理时多打一条 BrokenPipeError
+            self._send("quit")
         try:
             self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -224,6 +226,36 @@ class DualStackServer(Server):
         if isinstance(error, (ConnectionError, TimeoutError)):
             return
         super().handle_error(request, client_address)
+
+
+def make_redirect_handler(target):
+    """纯 HTTP 跳转入口：别的页面（如机器人控制台）只知道机器人的 IP，用它链过来，不用知道域名和 token。"""
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        server_version = "ptt_web"
+        sys_version = ""
+        timeout = 10
+
+        def log_message(self, fmt, *args):
+            pass
+
+        def do_GET(self):
+            log(f"跳转 {self.client_address[0]} | {self.headers.get('User-Agent', '-')[:160]}")
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.end_headers()
+
+    return RedirectHandler
+
+
+def make_server(listen, handler):
+    host, port = listen.rsplit(":", 1)
+    if host.startswith("[") and host.endswith("]"):
+        return DualStackServer((host[1:-1], int(port)), handler)
+    return Server((host, int(port)), handler)
 
 
 def make_handler(robot, token):
@@ -345,6 +377,9 @@ def main():
     parser.add_argument("--chat-log", default=None, help="ptt_chat 的输出写到这个文件 (默认: 和本服务同一个输出)")
     parser.add_argument("--tls-cert", default=None, help="HTTPS 证书链 (PEM)，和 --tls-key 一起给")
     parser.add_argument("--tls-key", default=None, help="HTTPS 私钥 (PEM)")
+    parser.add_argument("--redirect-listen", default=None,
+                        help="另开一个纯 HTTP 端口，所有 GET 都 302 到 --redirect-to，给别的页面一个不带 token 的入口")
+    parser.add_argument("--redirect-to", default=None, help="跳转目标，通常是带 token 的 https 页面地址")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="-- ptt_chat 命令行")
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -352,6 +387,8 @@ def main():
         parser.error("缺少 ptt_chat 命令行")
     if bool(args.tls_cert) != bool(args.tls_key):
         parser.error("--tls-cert 和 --tls-key 要一起给")
+    if bool(args.redirect_listen) != bool(args.redirect_to):
+        parser.error("--redirect-listen 和 --redirect-to 要一起给")
     tls = None
     if args.tls_cert:
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -361,14 +398,13 @@ def main():
     token = load_token(args.token_file)
     upload_dir = Path(args.upload_dir or os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "ptt_web"))
     upload_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    host, port = args.listen.rsplit(":", 1)
-    server_class = Server
-    if host.startswith("[") and host.endswith("]"):
-        host = host[1:-1]
-        server_class = DualStackServer
-
     robot = Robot(command, upload_dir, args.max_hold, args.idle_reset, args.chat_log)
-    server = server_class((host, int(port)), make_handler(robot, token))
+    server = make_server(args.listen, make_handler(robot, token))
+    redirect = None
+    if args.redirect_listen:
+        redirect = make_server(args.redirect_listen, make_redirect_handler(args.redirect_to))
+        threading.Thread(target=redirect.serve_forever, daemon=True).start()
+        log(f"跳转入口 http://{args.redirect_listen}/ -> 页面")
     if tls is not None:
         # 握手推迟到各连接自己的处理线程里第一次读时做，慢客户端不会卡住 accept
         server.socket = tls.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
@@ -387,6 +423,9 @@ def main():
     finally:
         robot.stop()
         server.server_close()
+        if redirect is not None:
+            redirect.shutdown()
+            redirect.server_close()
     sys.exit(0 if robot.proc.returncode in (0, None) else 1)
 
 
