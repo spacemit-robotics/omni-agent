@@ -77,6 +77,7 @@ struct PttConfig {
     int reasoning_budget = 0;
     std::string llm_extra_body;
     std::string llm_error_speech = "网络不太好，请再说一次。";
+    int llm_stall_timeout = 10;  // curl 按测速窗口判断，实际约多 5 s
     int event_fd = -1;
 };
 
@@ -386,6 +387,7 @@ void printUsage(const char* program) {
         << "  --max-tokens <n>           (默认: 150)\n"
         << "  --reasoning-budget <n>     (默认: 0，不念推理内容)\n"
         << "  --llm-extra-body <json>    合并进每个 LLM 请求体的 JSON 对象，如 '{\"thinking\":{\"type\":\"disabled\"}}'\n"
+        << "  --llm-stall-timeout <s>    LLM 连接或传输这么多秒没进展就算出错（实际约多 5 s），0 用组件默认 (默认: 10)\n"
         << "  --llm-error-speech <text>  LLM 出错且还没开口时播的话，空串不播 (默认: 网络不太好，请再说一次。)\n"
         << "  --event-fd <fd>            事件写到这个 fd (默认: stdout，带 \"@event \" 前缀)\n"
         << "输入: wav <path> | text <文字> | interrupt | reset | quit，一行一条。\n";
@@ -420,6 +422,8 @@ bool parseArgs(int argc, char* argv[], PttConfig* cfg) {
             cfg->reasoning_budget = std::stoi(argv[++i]);
         } else if (arg == "--llm-extra-body" && has_value) {
             cfg->llm_extra_body = argv[++i];
+        } else if (arg == "--llm-stall-timeout" && has_value) {
+            cfg->llm_stall_timeout = std::stoi(argv[++i]);
         } else if (arg == "--llm-error-speech" && has_value) {
             cfg->llm_error_speech = argv[++i];
         } else if (arg == "--event-fd" && has_value) {
@@ -456,6 +460,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
     }
+    llm->update_stall_timeout(cfg.llm_stall_timeout);
     auto system_prompt = llm_result.system_prompt;
 
     auto asr = initASR(cfg.asr_engine, "", "", 0);
@@ -542,6 +547,11 @@ int main(int argc, char* argv[]) {
     ctx.vad_frame_buffer = &vad_frame_buffer;
     ctx.vad_state_mutex = &vad_state_mutex;
     ctx.pre_buffer = &pre_buffer;
+    // 网络卡住时大模型迟迟不回数据，interrupt 要能立刻取消请求，不用等到超时
+    llm->set_abort_check([&]() {
+        if (current_is_stale()) g_barge_in = true;
+        return g_barge_in.load() || !g_running.load();
+    });
     bool llm_failed = false;  // 只在处理线程里读写
     ctx.on_llm_error = [&](const std::string&) { llm_failed = true; };
     ctx.llm_error_speech = cfg.llm_error_speech;
