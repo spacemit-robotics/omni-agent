@@ -28,6 +28,7 @@ using IsPlayingCallback = std::function<bool()>;
 using ClearPlaybackCallback = std::function<void()>;
 using SaveTtsAudioCallback = std::function<void(const std::vector<uint8_t>& pcm16_bytes)>;
 using FlushPendingCaptureCallback = std::function<void()>;
+using LlmErrorCallback = std::function<void(const std::string& error)>;
 
 struct VoicePipelineContext {
     std::shared_ptr<spacemit_llm::LLMService> llm;
@@ -40,6 +41,9 @@ struct VoicePipelineContext {
     ClearPlaybackCallback clear_playback;
     SaveTtsAudioCallback save_tts_audio;
     FlushPendingCaptureCallback flush_pending_capture;
+    // LLM 出错时调用；这一轮还没开口、也没调工具时再播 llm_error_speech（空 = 不播）
+    LlmErrorCallback on_llm_error;
+    std::string llm_error_speech;
 
     // State variables (references from main)
     std::vector<float>* audio_buffer;

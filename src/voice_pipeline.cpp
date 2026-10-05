@@ -231,6 +231,16 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
         }
     };
 
+    // 网络断了时用户什么都听不到，会以为没被听见；还没开口就先说一句兜底，播完再返回
+    auto handleLlmError = [&](const std::string& error, bool said_something) {
+        if (ctx.on_llm_error) ctx.on_llm_error(error);
+        if (said_something || ctx.llm_error_speech.empty() || g_barge_in || !g_running) return;
+        synthesizeSentence(ctx.llm_error_speech);
+        while (ctx.is_playing() && g_running && !g_barge_in) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    };
+
 #ifdef USE_MCP
     if (ctx.mcp_enabled) {
         {
@@ -301,6 +311,7 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
             }
             if (!result.error.empty()) {
                 recordUnfinishedRound("出错中断");
+                handleLlmError(result.error, sentence_count > 0 || tools_ran);
                 g_processing = false;
                 return;
             }
@@ -447,6 +458,7 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
             std::cout << "\n" << getTimestamp() << " [LLM] 已因 barge-in 中断生成\n";
         } else if (!result.error.empty()) {
             std::cerr << "\n" << getTimestamp() << " [LLM错误] " << result.error << std::endl;
+            handleLlmError(result.error, sentence_count > 0);
             g_processing = false;
             return;
         }

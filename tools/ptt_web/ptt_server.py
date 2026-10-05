@@ -193,7 +193,10 @@ class Robot:
         try:
             self.proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            self.proc.terminate()
+            # 播放设备被拔掉后 ptt_chat 可能卡在退出里，SIGTERM 也不理；不杀掉就成了占着声卡的孤儿
+            log("ptt_chat 5 s 内没退出，强制结束")
+            self.proc.kill()
+            self.proc.wait()
 
 
 class Server(ThreadingHTTPServer):
