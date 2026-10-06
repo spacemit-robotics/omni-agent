@@ -27,3 +27,12 @@ tests:
     workdir: sdk
     command: |
       bash application/native/omni_agent/tests/test_tool_speech.sh
+
+  - name: omni-agent-ptt-web
+    description: Verifies the push-to-talk web server against a fake ptt_chat - shared history, streamed reply text, pending then performed actions, kept text on interrupt, idle-reset marker, press locking, api/info and the HTTP redirect keeping back=.
+    category: functional
+    scopes: [pr]
+    timeout_s: 60
+    workdir: sdk
+    command: |
+      python3 application/native/omni_agent/tests/test_ptt_web.py

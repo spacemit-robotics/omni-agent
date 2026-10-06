@@ -439,7 +439,7 @@ text_chat --llm-url https://api.deepseek.com/v1 --model deepseek-flash \
 | `reset` | 清空对话记忆，当前回答结束后生效 |
 | `quit` | 退出 |
 
-事件（识别结果、回答文字、工具结果、状态）写到 `--event-fd`，每行一个 JSON，格式见 `examples/ptt_chat.cpp` 开头。`-o none` 用假播放器，不出声。
+事件（状态、识别结果、边生成边发的回答文字、准备调用 / 已调用的工具、最终回答）写到 `--event-fd`，每行一个 JSON，格式见 `examples/ptt_chat.cpp` 开头。`-o none` 用假播放器，不出声。
 
 `tools/ptt_web/ptt_server.py`（只依赖 Python 标准库）提供网页并管理 `ptt_chat` 子进程：
 
@@ -451,10 +451,15 @@ python3 tools/ptt_web/ptt_server.py --listen 127.0.0.1:18080 --chat-log /tmp/ptt
 ```
 
 - 页面和接口都在 `/<token>/` 下，其他路径 404。token 存在 `--token-file`（默认 `~/.config/ptt_web/token`，不存在时生成）；扫码地址即 `https://<域名>/<token>/`。
-- 手机浏览器只在 HTTPS 下允许录音，本服务只监听本机，HTTPS 由前面的反向代理提供。
+- 手机浏览器只在 HTTPS 下允许录音：`--tls-cert` / `--tls-key` 直接提供 HTTPS（局域网用），或只监听本机、由前面的反向代理提供。
+- `--redirect-listen` / `--redirect-to` 另开一个纯 HTTP 端口，所有请求 302 到页面并保留查询参数，给只知道机器人 IP 的页面（如机器人控制台）当入口。
 - 一次只让一个人按住说话；按下即打断机器人。机器人回答某个人时，别人要等它说完（60 s 后不再保护）。
+- 页面显示最近 30 轮对话（所有人的，别人的标「其他人」），回答边生成边显示，模型决定做动作时先显示「准备做「挥手」」，做了再换成结果。
+- `--robot-name` 是页面上的机器人名字；`--actions key=显示名,...`（和 `humanoid_operator_mcp --actions` 同一格式）列在页面上，告诉用户能让它做什么。
+- 带 `?back=<网址>` 打开时顶栏显示「控制模式 | 语音模式」，可切回该网址（机器人控制台跳过来时带上）。
 - 录音只保留最近 20 段，放在 `--upload-dir`（默认 `$XDG_RUNTIME_DIR/ptt_web`）。
-- `--idle-reset <秒>` 空闲后清空对话记忆，避免上一位观众的对话带到下一位；默认不清。
+- `--idle-reset <秒>` 空闲后清空对话记忆，避免上一位观众的对话带到下一位，页面上画一条分隔线；默认不清。
+- 测试：`python3 tests/test_ptt_web.py`（假 ptt_chat，不需要模型）。
 
 ### 声纹工具
 

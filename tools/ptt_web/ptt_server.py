@@ -6,9 +6,10 @@
 """按住说话网页：手机按住按钮录音，松手上传，交给 ptt_chat 识别、回答并用本机扬声器播放。
 
     ptt_server.py [--listen 127.0.0.1:18080] [--token-file F] [--tls-cert C --tls-key K]
-                  [--redirect-listen [::]:8442 --redirect-to URL] -- ptt_chat ...
+                  [--redirect-listen [::]:8442 --redirect-to URL] [--robot-name N] [--actions k=名,...] -- ptt_chat ...
 
 页面和接口都在 /<token>/ 下，其他路径一律 404。一次只让一个人说；机器人回答某个人时，别人要等它说完。
+页面显示最近的对话（所有人的），回答边生成边显示；动作清单来自 --actions（和 humanoid_operator_mcp 同一格式）。
 手机浏览器只在 HTTPS 下允许录音：给了 --tls-cert/--tls-key 时本服务直接提供 HTTPS（例如在局域网监听），
 否则只监听本机，由前面的反向代理提供 HTTPS。
 """
@@ -29,11 +30,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 HERE = Path(__file__).resolve().parent
-STATIC = {"": ("index.html", "text/html; charset=utf-8"), "app.js": ("app.js", "text/javascript; charset=utf-8")}
+STATIC = {"": ("index.html", "text/html; charset=utf-8"), "app.js": ("app.js", "text/javascript; charset=utf-8"),
+          "style.css": ("style.css", "text/css; charset=utf-8"), "logo.svg": ("logo.svg", "image/svg+xml")}
 MAX_UPLOAD = 2 * 1024 * 1024  # 16 kHz 单声道 16 位约 60 s
 KEEP_UPLOADS = 20
-CSP = ("default-src 'self'; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; base-uri 'none'; "
-       "form-action 'none'")
+KEEP_TURNS = 30               # 页面上能往回翻的轮数
+CSP = "default-src 'self'; media-src 'self' blob:; base-uri 'none'; form-action 'none'"
 
 
 def log(message):
@@ -43,7 +45,9 @@ def log(message):
 class Robot:
     """ptt_chat 子进程和对话状态。所有状态由 cond 保护，seq 每次变化加一，供长轮询等待。"""
 
-    def __init__(self, command, upload_dir, max_hold_s, idle_reset_s, chat_log):
+    def __init__(self, command, upload_dir, max_hold_s, idle_reset_s, chat_log, robot_name="机器人", actions=None):
+        self.robot_name = robot_name
+        self.actions = actions or {}  # 动作键 -> 显示名
         self.upload_dir = upload_dir
         self.max_hold_s = max_hold_s
         self.idle_reset_s = idle_reset_s
@@ -55,7 +59,8 @@ class Robot:
         self.holder = None          # 正在按住说话的客户端
         self.hold_until = 0.0
         self.next_id = 0            # 和 ptt_chat 的任务编号一一对应：只有 wav 命令会占号
-        self.turns = {}             # id -> {owner, heard, reply, tools, started}
+        self.turns = {}             # id -> {owner, heard, live, reply, pending, tools, started, wall}
+        self.resets = []            # 空闲清空记忆时最后一轮的编号，页面在它后面画分隔线
         self.last_activity = time.monotonic()
         read_fd, write_fd = os.pipe()
         output = open(chat_log, "a", encoding="utf-8") if chat_log else None  # 子进程一直用到退出
@@ -94,12 +99,23 @@ class Robot:
                 elif kind == "state":
                     if event.get("id") == self.next_id:
                         self.state = event.get("state", "idle")
+                    if event.get("state") == "idle" and turn is not None:
+                        turn["pending"] = []
                 elif kind == "asr" and turn is not None:
                     turn["heard"] = event.get("text", "")
                     log(f"#{event['id']} 识别 {event.get('ms')} ms: {turn['heard']!r}")
+                elif kind == "delta" and turn is not None:
+                    turn["live"] += event.get("text", "")
+                elif kind == "tool" and turn is not None:
+                    turn["pending"].append(self._tool_label(event.get("name", ""), event.get("args")))
+                elif kind == "tool_result" and turn is not None:
+                    if turn["pending"]:
+                        turn["pending"].pop(0)
+                    turn["tools"].append(event.get("text", ""))
                 elif kind == "reply" and turn is not None:
                     turn["reply"] = event.get("text", "")
                     turn["tools"] = event.get("tools", [])
+                    turn["pending"] = []
                     turn["interrupted"] = event.get("interrupted", False)
                     log(f"#{event['id']} 回答: {turn['reply']!r} {turn['tools']}")
                 elif kind == "error" and turn is not None:
@@ -116,7 +132,7 @@ class Robot:
     def _idle_reset(self):
         reset_done = True
         while self.alive:
-            time.sleep(5)
+            time.sleep(min(5, self.idle_reset_s))
             with self.cond:
                 idle = self.state == "idle" and self.holder is None
                 quiet = time.monotonic() - self.last_activity > self.idle_reset_s
@@ -125,13 +141,30 @@ class Robot:
                 elif not reset_done:
                     self._send("reset")
                     reset_done = True
+                    if self.next_id and self.next_id not in self.resets:
+                        self.resets = self.resets[-9:] + [self.next_id]
+                        self._changed()
                     log(f"空闲 {self.idle_reset_s} s，清空对话记忆")
+
+    def _tool_label(self, name, args):
+        if name == "perform_action" and isinstance(args, dict):
+            action = str(args.get("action", ""))
+            return f"准备做「{self.actions.get(action, action)}」"
+        if name == "stop_action":
+            return "准备停止动作"
+        return f"准备调用 {name}"
 
     def _holder_active(self):
         if self.holder is not None and time.monotonic() > self.hold_until:
             log(f"{self.holder} 按住超时，释放")
             self.holder = None
         return self.holder
+
+    def _answering_other(self, client):
+        """机器人正在回答别人（不让打断）；卡住超过 60 s 的不算，免得一直按不了。"""
+        turn = self.turns.get(self.next_id)
+        return (self.state != "idle" and turn is not None and turn["owner"] != client
+                and time.monotonic() - turn["started"] < 60)
 
     def press(self, client):
         with self.cond:
@@ -140,9 +173,7 @@ class Robot:
             holder = self._holder_active()
             if holder not in (None, client):
                 return False, "别人正在说话，请稍等"
-            turn = self.turns.get(self.next_id)
-            answering = self.state != "idle" and turn is not None and turn["owner"] != client
-            if answering and time.monotonic() - turn["started"] < 60:
+            if self._answering_other(client):
                 return False, "机器人正在回答别人，请稍等"
             self.holder = client
             self.hold_until = time.monotonic() + self.max_hold_s + 10
@@ -167,9 +198,9 @@ class Robot:
             path.write_bytes(wav)
             stale = self.upload_dir / f"{turn_id - KEEP_UPLOADS:05d}.wav"
             stale.unlink(missing_ok=True)
-            self.turns = {k: v for k, v in self.turns.items() if k > turn_id - 10}
-            self.turns[turn_id] = {"owner": client, "heard": None, "reply": None, "tools": [],
-                                   "started": time.monotonic()}
+            self.turns = {k: v for k, v in self.turns.items() if k > turn_id - KEEP_TURNS}
+            self.turns[turn_id] = {"owner": client, "heard": None, "live": "", "reply": None, "pending": [],
+                                   "tools": [], "started": time.monotonic(), "wall": time.time()}
             self.state = "recognizing"
             self.holder = None
             self._send(f"wav {path}")
@@ -178,16 +209,25 @@ class Robot:
 
     def status(self, client, since, timeout):
         with self.cond:
-            self.cond.wait_for(lambda: self.seq != since, timeout=timeout)
+            changed = self.cond.wait_for(lambda: self.seq != since, timeout=timeout)
+        if changed and since >= 0:
+            time.sleep(0.06)  # 回答边生成边推送，一秒几十段：攒一下再回，手机少折腾
+        with self.cond:
             holder = self._holder_active()
-            turn = self.turns.get(self.next_id)
-            view = None
-            if turn is not None:
-                view = {"id": self.next_id, "mine": turn["owner"] == client, "heard": turn["heard"],
-                        "reply": turn["reply"], "tools": turn["tools"], "error": turn.get("error")}
+            now = time.time()
+            history = [{"id": k, "mine": t["owner"] == client, "heard": t["heard"], "live": t["live"],
+                        "reply": t["reply"], "pending": list(t["pending"]), "tools": list(t["tools"]),
+                        "error": t.get("error"), "interrupted": t.get("interrupted", False),
+                        "ago_s": int(now - t["wall"])}
+                       for k, t in sorted(self.turns.items())]
             return {"seq": self.seq, "alive": self.alive, "ready": self.ready, "state": self.state,
                     "holder": None if holder is None else ("me" if holder == client else "other"),
-                    "turn": view, "max_hold_s": self.max_hold_s}
+                    "answering_other": self._answering_other(client),
+                    "live_id": self.next_id, "history": history,
+                    "resets": [r for r in self.resets if r in self.turns], "max_hold_s": self.max_hold_s}
+
+    def info(self):
+        return {"robot": self.robot_name, "actions": list(self.actions.values())}
 
     def stop(self):
         if self.proc.poll() is None:  # 已经退出时再写 quit 只会在退出清理时多打一条 BrokenPipeError
@@ -241,8 +281,9 @@ def make_redirect_handler(target):
 
         def do_GET(self):
             log(f"跳转 {self.client_address[0]} | {self.headers.get('User-Agent', '-')[:160]}")
+            query = urlsplit(self.path).query  # 例如 back=<控制台地址>，页面据此显示「控制模式」
             self.send_response(302)
-            self.send_header("Location", target)
+            self.send_header("Location", target + ("?" + query if query else ""))
             self.send_header("Content-Length", "0")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Referrer-Policy", "no-referrer")
@@ -307,6 +348,8 @@ def make_handler(robot, token):
                 if route == "":
                     log(f"打开页面 {self.client_address[0]} | {self.headers.get('User-Agent', '-')[:160]}")
                 self._reply(200, (HERE / name).read_bytes(), content_type)
+            elif route == "api/info":
+                self._reply(200, robot.info())
             elif route == "api/status":
                 try:
                     since = int(query.get("since", "-1"))
@@ -380,6 +423,9 @@ def main():
     parser.add_argument("--redirect-listen", default=None,
                         help="另开一个纯 HTTP 端口，所有 GET 都 302 到 --redirect-to，给别的页面一个不带 token 的入口")
     parser.add_argument("--redirect-to", default=None, help="跳转目标，通常是带 token 的 https 页面地址")
+    parser.add_argument("--robot-name", default="机器人", help="页面上显示的机器人名字 (默认: 机器人)")
+    parser.add_argument("--actions", default="",
+                        help="页面上列出的动作，key=显示名,...，和 humanoid_operator_mcp --actions 同一格式")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="-- ptt_chat 命令行")
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -398,7 +444,9 @@ def main():
     token = load_token(args.token_file)
     upload_dir = Path(args.upload_dir or os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "ptt_web"))
     upload_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    robot = Robot(command, upload_dir, args.max_hold, args.idle_reset, args.chat_log)
+    actions = dict(item.split("=", 1) if "=" in item else (item, item)
+                   for item in (part.strip() for part in args.actions.split(",")) if item)
+    robot = Robot(command, upload_dir, args.max_hold, args.idle_reset, args.chat_log, args.robot_name, actions)
     server = make_server(args.listen, make_handler(robot, token))
     redirect = None
     if args.redirect_listen:
