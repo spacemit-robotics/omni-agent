@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """ptt_server.py 端到端测试：假的机器人控制台 + 假的 ptt_chat，检查转发和语音面板拿到的对话状态。
 
-转发：控制台页面原样转发（Host 不改）、只给本机的配对入口不转发（伪造 Host 也不行）、WebSocket 双向转发、控制台挂了回 502。
+转发：控制台页面原样转发（Host 不改）、只给本机的配对入口不转发（伪造 Host 也不行）、WebSocket 双向转发
+（明文和 TLS 各一遍，TLS 下用跨多个记录的大消息）、控制台挂了回 502。
 语音：面板文件、接口要带配对令牌（重新配对后旧令牌失效）、按住互斥、回答别人时不让按、边生成边显示、
 准备做动作 → 已做、被打断时留下已显示的文字、空闲清空记忆的分隔标记、纯 HTTP 跳转带上查询参数、退出时让 ptt_chat 退出。
 """
@@ -14,6 +15,7 @@ import shutil
 import signal
 import socket
 import socketserver
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -106,7 +108,7 @@ class FakeConsoleHandler(socketserver.StreamRequestHandler):
                 data = self.connection.recv(4096)
                 if not data:
                     return
-                self.connection.sendall(b"echo:" + data)
+                self.connection.sendall(data[::-1])  # 每块倒序回显：收到的一定是控制台处理过的，不是原样折回
         if target == "/api/v1/local-session":
             body = b'{"token":"console-secret"}'  # 真的服务对本机对端 + localhost Host 才发；这里一律发，看代理拦不拦
         elif target == "/" and method == "GET":
@@ -160,6 +162,20 @@ def main():
          "--", sys.executable, str(work / "fake_chat.py"), str(work)],
         stdout=open(work / "server.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
     token = {"X-Operator-Token": "optoken-one"}
+    # 同一个假控制台再起一个 TLS 实例（机器人上就是这样跑的），只测转发
+    tls_port = free_port()
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost",
+                    "-keyout", str(work / "key.pem"), "-out", str(work / "cert.pem")], check=True, capture_output=True)
+    (work / "tls").mkdir()
+    tls_server = subprocess.Popen(
+        [sys.executable, str(SERVER), "--listen", f"127.0.0.1:{tls_port}", "--operator-connection", str(connection),
+         "--console", f"127.0.0.1:{console_port}", "--upload-dir", str(work / "tls" / "up"),
+         "--tls-cert", str(work / "cert.pem"), "--tls-key", str(work / "key.pem"),
+         "--", sys.executable, str(work / "fake_chat.py"), str(work / "tls")],
+        stdout=open(work / "tls_server.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
+    insecure = ssl.create_default_context()
+    insecure.check_hostname = False
+    insecure.verify_mode = ssl.CERT_NONE
 
     def api(path, client, method="GET", body=None, since=-1, headers=token):
         extra = f"&since={since}" if path == "status" else ""
@@ -206,9 +222,40 @@ def main():
             for message in (b"hello", b"renew" * 100):
                 ws.sendall(message)
                 got = b""
-                while len(got) < len(message) + 5:
+                while len(got) < len(message):
                     got += ws.recv(65536)
-                check(got == b"echo:" + message, f"WebSocket 回显: {got[:40]}")
+                check(got == message[::-1], f"WebSocket 回显: {got[:40]}")
+
+        # TLS：首页和大消息 WebSocket（64 KB 跨多个 TLS 记录，解密后留在缓冲里的部分 select 看不到）
+        for _ in range(50):
+            try:
+                with socket.create_connection(("127.0.0.1", tls_port), timeout=1):
+                    break
+            except OSError:
+                time.sleep(0.1)
+        with urllib.request.urlopen(f"https://127.0.0.1:{tls_port}/", context=insecure, timeout=10) as r:
+            check(r.status == 200 and b"<title>console</title>" in r.read(), "TLS 转发首页")
+        raw = socket.create_connection(("127.0.0.1", tls_port), timeout=5)
+        with insecure.wrap_socket(raw, server_hostname="localhost") as ws:
+            ws.sendall(f"GET /api/v1/ws HTTP/1.1\r\nHost: 127.0.0.1:{tls_port}\r\nUpgrade: websocket\r\n"
+                       f"Connection: Upgrade\r\n\r\n".encode())
+            head = b""
+            while b"\r\n\r\n" not in head:
+                head += ws.recv(4096)
+            check(head.startswith(b"HTTP/1.1 101"), f"TLS WebSocket 升级: {head[:40]}")
+            for message in (bytes(range(256)) * 256, b"small"):  # 64 KB，倒序回显后仍按块可比
+                ws.sendall(message)
+                got = b""
+                while len(got) < len(message):
+                    got += ws.recv(65536)
+                check(len(got) == len(message) and sorted(got) == sorted(message),
+                      f"TLS WebSocket 回显 {len(message)} 字节: 收到 {len(got)}")
+        try:  # 明文连 TLS 端口：握手失败断开，服务照常
+            request(f"http://127.0.0.1:{tls_port}/")
+        except OSError:
+            pass
+        with urllib.request.urlopen(f"https://127.0.0.1:{tls_port}/", context=insecure, timeout=10) as r:
+            check(r.status == 200, "明文乱连之后 TLS 照常")
 
         # 语音面板文件
         for path, kind in (("panel.js", "javascript"), ("panel.css", "text/css")):
@@ -299,8 +346,11 @@ def main():
         print(f"FAIL: {type(e).__name__}: {e}\n--- {work}/server.log ---\n{(work / 'server.log').read_text()}",
               file=sys.stderr)
         os.killpg(server.pid, signal.SIGKILL)
+        os.killpg(tls_server.pid, signal.SIGKILL)
         sys.exit(1)
 
+    tls_server.send_signal(signal.SIGTERM)
+    tls_server.wait(timeout=10)
     server.send_signal(signal.SIGTERM)
     code = server.wait(timeout=10)
     commands = (work / "commands").read_text().split()
