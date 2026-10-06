@@ -3,21 +3,26 @@
 # Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
 # SPDX-License-Identifier: Apache-2.0
 #
-"""按住说话网页：手机按住按钮录音，松手上传，交给 ptt_chat 识别、回答并用本机扬声器播放。
+"""机器人控制台的语音对话：给控制台网页提供 HTTPS 和按住说话的语音面板，录音交给 ptt_chat 识别、回答并用本机扬声器播放。
 
-    ptt_server.py [--listen 127.0.0.1:18080] [--token-file F] [--tls-cert C --tls-key K]
-                  [--redirect-listen [::]:8442 --redirect-to URL] [--robot-name N] [--actions k=名,...] -- ptt_chat ...
+    ptt_server.py --operator-connection FILE [--console 127.0.0.1:8765] [--listen 127.0.0.1:18080]
+                  [--tls-cert C --tls-key K] [--redirect-listen [::]:8442 --redirect-to URL]
+                  [--actions k=名,...] -- ptt_chat ...
 
-页面和接口都在 /<token>/ 下，其他路径一律 404。一次只让一个人说；机器人回答某个人时，别人要等它说完。
-页面显示最近的对话（所有人的），回答边生成边显示；动作清单来自 --actions（和 humanoid_operator_mcp 同一格式）。
-手机浏览器只在 HTTPS 下允许录音：给了 --tls-cert/--tls-key 时本服务直接提供 HTTPS（例如在局域网监听），
-否则只监听本机，由前面的反向代理提供 HTTPS。
+手机浏览器只在 HTTPS 页面里允许录音，而机器人控制台（humanoid_common operator_service）是纯 HTTP，所以由本服务
+给它套一层 HTTPS：/voice/ 以外的请求原样转发给 --console（含 WebSocket），控制台网页再从 /voice/panel.js 加载语音面板，
+在同一页里切换「控制 | 语音」。语音接口 /voice/api/* 要带控制台的配对令牌（X-Operator-Token，和 --operator-connection
+连接文件里的一致），没配对的人用不了。
+
+一次只让一个人说；机器人回答某个人时，别人要等它说完。面板显示最近的对话（所有人的），回答边生成边显示；
+动作清单来自 --actions（和 humanoid_operator_mcp 同一格式）。
 """
 
 import argparse
+import hmac
 import json
 import os
-import secrets
+import select
 import signal
 import socket
 import ssl
@@ -30,12 +35,15 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 HERE = Path(__file__).resolve().parent
-STATIC = {"": ("index.html", "text/html; charset=utf-8"), "app.js": ("app.js", "text/javascript; charset=utf-8"),
-          "style.css": ("style.css", "text/css; charset=utf-8"), "logo.svg": ("logo.svg", "image/svg+xml")}
+VOICE = "/voice/"
+STATIC = {"panel.js": ("panel.js", "text/javascript; charset=utf-8"), "panel.css": ("panel.css", "text/css; charset=utf-8")}
+# 控制台只给本机用的入口：对端是本机且 Host 是 localhost 时直接发配对令牌（server.cpp）。经本服务转发时对端就是本机，
+# Host 又由请求方决定，转发出去等于把令牌发给局域网里任何人，所以一律不转发。
+BLOCKED = ("/api/v1/local-session", "/pairing.svg")
+TUNNEL_IDLE_S = 120           # 转发的连接两头都这么久没数据就断开（控制台的 WebSocket 一直有状态推送）
 MAX_UPLOAD = 2 * 1024 * 1024  # 16 kHz 单声道 16 位约 60 s
 KEEP_UPLOADS = 20
 KEEP_TURNS = 30               # 页面上能往回翻的轮数
-CSP = "default-src 'self'; media-src 'self' blob:; base-uri 'none'; form-action 'none'"
 
 
 def log(message):
@@ -45,8 +53,7 @@ def log(message):
 class Robot:
     """ptt_chat 子进程和对话状态。所有状态由 cond 保护，seq 每次变化加一，供长轮询等待。"""
 
-    def __init__(self, command, upload_dir, max_hold_s, idle_reset_s, chat_log, robot_name="机器人", actions=None):
-        self.robot_name = robot_name
+    def __init__(self, command, upload_dir, max_hold_s, idle_reset_s, chat_log, actions=None):
         self.actions = actions or {}  # 动作键 -> 显示名
         self.upload_dir = upload_dir
         self.max_hold_s = max_hold_s
@@ -227,7 +234,7 @@ class Robot:
                     "resets": [r for r in self.resets if r in self.turns], "max_hold_s": self.max_hold_s}
 
     def info(self):
-        return {"robot": self.robot_name, "actions": list(self.actions.values())}
+        return {"actions": list(self.actions.values())}
 
     def stop(self):
         if self.proc.poll() is None:  # 已经退出时再写 quit 只会在退出清理时多打一条 BrokenPipeError
@@ -239,6 +246,47 @@ class Robot:
             log("ptt_chat 5 s 内没退出，强制结束")
             self.proc.kill()
             self.proc.wait()
+
+
+class OperatorToken:
+    """控制台的配对令牌，取自操作服务写的连接文件（和 humanoid_operator_mcp 读的同一个）；重新配对后文件变了就重读。"""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.lock = threading.Lock()
+        self.mtime = None
+        self.token = ""
+
+    def check(self, presented):
+        with self.lock:
+            try:
+                mtime = self.path.stat().st_mtime_ns
+                if mtime != self.mtime:
+                    self.token = str(json.loads(self.path.read_text()).get("token", ""))
+                    self.mtime = mtime
+            except (OSError, ValueError, AttributeError):
+                self.token, self.mtime = "", None
+            token = self.token
+        return bool(token and presented) and hmac.compare_digest(token.encode(), presented.encode())
+
+
+def tunnel(client, upstream):
+    """两头双向转发，直到任一头关闭或都闲置 TUNNEL_IDLE_S。单线程 select：TLS 连接不能两个线程同时读写。"""
+    for sock in (client, upstream):
+        sock.settimeout(30)  # 只防 sendall 卡死：读之前 select 已确认有数据
+    try:
+        while True:
+            pending = getattr(client, "pending", None)  # TLS 已解密、还在缓冲里的数据 select 看不到
+            ready = [client] if pending and pending() else select.select([client, upstream], [], [], TUNNEL_IDLE_S)[0]
+            if not ready:
+                return
+            for sock in ready:
+                data = sock.recv(65536)
+                if not data:
+                    return
+                (upstream if sock is client else client).sendall(data)
+    except (OSError, ValueError):
+        return
 
 
 class Server(ThreadingHTTPServer):
@@ -269,7 +317,8 @@ class DualStackServer(Server):
 
 
 def make_redirect_handler(target):
-    """纯 HTTP 跳转入口：别的页面（如机器人控制台）只知道机器人的 IP，用它链过来，不用知道域名和 token。"""
+    """纯 HTTP 跳转入口：控制台的 HTTP 页面只知道机器人的 IP，经这里跳到本服务的 HTTPS 地址。
+    查询参数原样带上；#token= 片段不发给服务端，浏览器跳转后自己保留。"""
 
     class RedirectHandler(BaseHTTPRequestHandler):
         server_version = "ptt_web"
@@ -299,9 +348,7 @@ def make_server(listen, handler):
     return Server((host, int(port)), handler)
 
 
-def make_handler(robot, token):
-    prefix = f"/{token}/"
-
+def make_handler(robot, operator_token, console):
     class Handler(BaseHTTPRequestHandler):
         server_version = "ptt_web"
         sys_version = ""
@@ -323,34 +370,65 @@ def make_handler(robot, token):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
-            self.send_header("Content-Security-Policy", CSP)
             self.end_headers()
             self.wfile.write(data)
 
-        def _route(self):
+        def _voice(self):
+            """/voice/ 下的路径，返回 (相对路径, 查询参数)；不是语音的请求返回 (None, {})。"""
             url = urlsplit(self.path)
-            if url.path == f"/{token}":
-                return "redirect", {}
-            if not url.path.startswith(prefix):
+            if not url.path.startswith(VOICE):
                 return None, {}
-            query = {k: v[-1] for k, v in parse_qs(url.query).items()}
-            return url.path[len(prefix):], query
+            return url.path[len(VOICE):], {k: v[-1] for k, v in parse_qs(url.query).items()}
+
+        def _authorized(self):
+            if operator_token.check(self.headers.get("X-Operator-Token", "")):
+                return True
+            self._reply(401, {"ok": False, "error": "请先扫码配对机器人"})
+            return False
+
+        def _proxy(self):
+            """原样转发给控制台，包括 WebSocket 升级：请求头一字不改（Host / Origin 要和浏览器看到的一致，
+            控制台据此做跨站检查），之后两头直接对接。控制台每个 HTTP 响应后都关连接，一次转发只有一个请求。"""
+            target = self.path.split("?", 1)[0]
+            if console is None or target in BLOCKED or urlsplit(self.path).path in BLOCKED:
+                self._reply(404, {"ok": False})
+                return
+            if self.command == "GET" and target == "/":
+                log(f"打开控制台 {self.client_address[0]} | {self.headers.get('User-Agent', '-')[:160]}")
+            try:
+                upstream = socket.create_connection(console, timeout=5)
+            except OSError as error:
+                log(f"连不上控制台 {console[0]}:{console[1]}: {error}")
+                self._reply(502, {"ok": False, "error": "机器人控制台没有响应"})
+                return
+            self.close_connection = True
+            with upstream:
+                lines = [self.requestline] + [f"{key}: {value}" for key, value in self.headers.items()]
+                try:
+                    upstream.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
+                    length = int(self.headers.get("Content-Length") or 0)
+                    if 0 < length <= MAX_UPLOAD:
+                        upstream.sendall(self.rfile.read(length))
+                except (OSError, ValueError):
+                    return
+                tunnel(self.connection, upstream)
+
+        def do_HEAD(self):
+            self._proxy()
 
         def do_GET(self):
-            route, query = self._route()
-            if route == "redirect":
-                self.send_response(301)
-                self.send_header("Location", prefix)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
+            route, query = self._voice()
+            if route is None:
+                self._proxy()
             elif route in STATIC:
                 name, content_type = STATIC[route]
-                if route == "":
-                    log(f"打开页面 {self.client_address[0]} | {self.headers.get('User-Agent', '-')[:160]}")
                 self._reply(200, (HERE / name).read_bytes(), content_type)
             elif route == "api/info":
-                self._reply(200, robot.info())
+                if self._authorized():
+                    self._reply(200, robot.info())
             elif route == "api/status":
+                if not self._authorized():
+                    return
                 try:
                     since = int(query.get("since", "-1"))
                 except ValueError:
@@ -360,7 +438,10 @@ def make_handler(robot, token):
                 self._reply(404, {"ok": False})
 
         def do_POST(self):
-            route, query = self._route()
+            route, query = self._voice()
+            if route is None:
+                self._proxy()
+                return
             client = query.get("client", "")
             if route not in ("api/press", "api/release", "api/audio") or not 8 <= len(client) <= 64:
                 self._reply(404, {"ok": False})
@@ -371,7 +452,9 @@ def make_handler(robot, token):
                 self.close_connection = True
                 return
             body = self.rfile.read(length) if length else b""
-            peer = self.headers.get("CF-Connecting-IP") or self.headers.get("X-Forwarded-For") or self.client_address[0]
+            if not self._authorized():
+                return
+            peer = self.client_address[0]
             if route == "api/press":
                 ok, error = robot.press(client)
                 agent = self.headers.get("User-Agent", "-")[:160]
@@ -394,25 +477,15 @@ def make_handler(robot, token):
     return Handler
 
 
-def load_token(path):
-    path = Path(path)
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(secrets.token_urlsafe(12) + "\n")
-    token = path.read_text().strip()
-    if len(token) < 12 or not token.replace("-", "").replace("_", "").isalnum():
-        sys.exit(f"token 无效: {path}")
-    return token
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--listen", default="127.0.0.1:18080",
                         help="监听地址，[::]:PORT 同时监听 IPv4 和 IPv6 (默认: 127.0.0.1:18080)")
-    parser.add_argument("--token-file", default=os.path.expanduser("~/.config/ptt_web/token"),
-                        help="URL token，不存在时生成 (默认: ~/.config/ptt_web/token)")
+    parser.add_argument("--operator-connection", required=True,
+                        help="操作服务的连接文件（含配对令牌），语音接口用它校验；例如 "
+                             "~/.local/state/humanoid-operator/linglong/connection.json")
+    parser.add_argument("--console", default=None,
+                        help="机器人控制台 HOST:PORT，/voice/ 以外的请求转发过去，例如 127.0.0.1:8765 (默认: 不转发)")
     parser.add_argument("--upload-dir", default=None,
                         help=f"录音存放目录，只留最近 {KEEP_UPLOADS} 段 (默认: $XDG_RUNTIME_DIR/ptt_web)")
     parser.add_argument("--max-hold", type=int, default=15, help="最长按住秒数 (默认: 15)")
@@ -421,11 +494,10 @@ def main():
     parser.add_argument("--tls-cert", default=None, help="HTTPS 证书链 (PEM)，和 --tls-key 一起给")
     parser.add_argument("--tls-key", default=None, help="HTTPS 私钥 (PEM)")
     parser.add_argument("--redirect-listen", default=None,
-                        help="另开一个纯 HTTP 端口，所有 GET 都 302 到 --redirect-to，给别的页面一个不带 token 的入口")
-    parser.add_argument("--redirect-to", default=None, help="跳转目标，通常是带 token 的 https 页面地址")
-    parser.add_argument("--robot-name", default="机器人", help="页面上显示的机器人名字 (默认: 机器人)")
+                        help="另开一个纯 HTTP 端口，所有 GET 都 302 到 --redirect-to（保留查询参数），给 HTTP 控制台当跳板")
+    parser.add_argument("--redirect-to", default=None, help="跳转目标，本服务的 https 地址，如 https://<域名>:8443/")
     parser.add_argument("--actions", default="",
-                        help="页面上列出的动作，key=显示名,...，和 humanoid_operator_mcp --actions 同一格式")
+                        help="语音面板上列出的动作，key=显示名,...，和 humanoid_operator_mcp --actions 同一格式")
     parser.add_argument("command", nargs=argparse.REMAINDER, help="-- ptt_chat 命令行")
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -441,18 +513,23 @@ def main():
         tls.minimum_version = ssl.TLSVersion.TLSv1_2
         tls.load_cert_chain(args.tls_cert, args.tls_key)  # 证书有问题时在拉起 ptt_chat 之前就报错
 
-    token = load_token(args.token_file)
+    console = None
+    if args.console:
+        host, _, port = args.console.rpartition(":")
+        if not host or not port.isdigit():
+            parser.error("--console 要写成 HOST:PORT")
+        console = (host.strip("[]"), int(port))
     upload_dir = Path(args.upload_dir or os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "ptt_web"))
     upload_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     actions = dict(item.split("=", 1) if "=" in item else (item, item)
                    for item in (part.strip() for part in args.actions.split(",")) if item)
-    robot = Robot(command, upload_dir, args.max_hold, args.idle_reset, args.chat_log, args.robot_name, actions)
-    server = make_server(args.listen, make_handler(robot, token))
+    robot = Robot(command, upload_dir, args.max_hold, args.idle_reset, args.chat_log, actions)
+    server = make_server(args.listen, make_handler(robot, OperatorToken(args.operator_connection), console))
     redirect = None
     if args.redirect_listen:
         redirect = make_server(args.redirect_listen, make_redirect_handler(args.redirect_to))
         threading.Thread(target=redirect.serve_forever, daemon=True).start()
-        log(f"跳转入口 http://{args.redirect_listen}/ -> 页面")
+        log(f"跳转入口 http://{args.redirect_listen}/ -> {args.redirect_to}")
     if tls is not None:
         # 握手推迟到各连接自己的处理线程里第一次读时做，慢客户端不会卡住 accept
         server.socket = tls.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
@@ -463,7 +540,8 @@ def main():
 
     threading.Thread(target=watch, daemon=True).start()
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
-    log(f"监听 {'https' if tls else 'http'}://{args.listen}，页面路径 /<token>/（token 在 {args.token_file}）")
+    target = f"控制台 {args.console}" if console else "不转发控制台"
+    log(f"监听 {'https' if tls else 'http'}://{args.listen}，语音面板 {VOICE}panel.js，{target}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

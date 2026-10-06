@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
 # SPDX-License-Identifier: Apache-2.0
-"""ptt_server.py 端到端测试：用假的 ptt_chat 按步骤发事件，检查页面拿到的对话状态。
+"""ptt_server.py 端到端测试：假的机器人控制台 + 假的 ptt_chat，检查转发和语音面板拿到的对话状态。
 
-覆盖：静态文件和 CSP、api/info、按住互斥、回答别人时不让按、边生成边显示、准备做动作 → 已做、
-被打断时留下已显示的文字、空闲清空记忆的分隔标记、纯 HTTP 跳转带上 back 参数、退出时让 ptt_chat 退出。
+转发：控制台页面原样转发（Host 不改）、只给本机的配对入口不转发（伪造 Host 也不行）、WebSocket 双向转发、控制台挂了回 502。
+语音：面板文件、接口要带配对令牌（重新配对后旧令牌失效）、按住互斥、回答别人时不让按、边生成边显示、
+准备做动作 → 已做、被打断时留下已显示的文字、空闲清空记忆的分隔标记、纯 HTTP 跳转带上查询参数、退出时让 ptt_chat 退出。
 """
 
 import json
@@ -12,9 +13,11 @@ import os
 import shutil
 import signal
 import socket
+import socketserver
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -22,7 +25,6 @@ from pathlib import Path
 
 SERVER = Path(__file__).resolve().parent.parent / "tools" / "ptt_web" / "ptt_server.py"
 
-# 假 ptt_chat：第 1 段录音分四步回答，每步等测试放行（gate-a / b / c）；第 2 段录音说一半被打断
 FAKE_CHAT = r'''
 import json, os, sys, time
 work = sys.argv[1]
@@ -31,7 +33,10 @@ out = os.fdopen(fd, "w", buffering=1)
 def emit(**event):
     out.write(json.dumps(event, ensure_ascii=False) + "\n")
 def gate(name):
+    deadline = time.monotonic() + 30  # 测试失败时不放行：到点自己退出，不留孤儿进程
     while not os.path.exists(os.path.join(work, name)):
+        if time.monotonic() > deadline:
+            sys.exit(1)
         time.sleep(0.02)
 def note(line):
     with open(os.path.join(work, "commands"), "a") as f:
@@ -66,8 +71,50 @@ for line in sys.stdin:
     emit(type="state", id=turn, state="idle")
 '''
 
+
 WAV = b"RIFF" + (36 + 3200).to_bytes(4, "little") + b"WAVEfmt " + bytes(28) + b"data" + (3200).to_bytes(4, "little") \
     + bytes(3200)
+
+
+class FakeConsole(socketserver.ThreadingTCPServer):
+    """假的操作服务网页：每个连接一个请求后关闭（和真的一样）；配对入口照真的逻辑对本机发令牌；WebSocket 回显。"""
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self):
+        self.seen = []  # (目标, Host)
+        super().__init__(("127.0.0.1", 0), FakeConsoleHandler)
+
+
+class FakeConsoleHandler(socketserver.StreamRequestHandler):
+    def handle(self):
+        lines = []
+        while True:
+            line = self.rfile.readline()
+            if line in (b"\r\n", b"\n", b""):
+                break
+            lines.append(line.decode("latin-1").rstrip("\r\n"))
+        if not lines:
+            return
+        method, target, _ = lines[0].split(" ", 2)
+        headers = {k.lower(): v.strip() for k, v in (h.split(":", 1) for h in lines[1:])}
+        self.server.seen.append((target, headers.get("host", "")))
+        if target == "/api/v1/ws" and headers.get("upgrade", "").lower() == "websocket":
+            self.wfile.write(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+            while True:
+                data = self.connection.recv(4096)
+                if not data:
+                    return
+                self.connection.sendall(b"echo:" + data)
+        if target == "/api/v1/local-session":
+            body = b'{"token":"console-secret"}'  # 真的服务对本机对端 + localhost Host 才发；这里一律发，看代理拦不拦
+        elif target == "/" and method == "GET":
+            body = b"<!doctype html><title>console</title>"
+        else:
+            self.wfile.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % (len(body), body))
 
 
 def free_port():
@@ -86,8 +133,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def request(url, method="GET", body=None):
-    req = urllib.request.Request(url, data=body, method=method)
+def request(url, method="GET", body=None, headers=None):
+    req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
     try:
         with urllib.request.build_opener(NoRedirect).open(req, timeout=10) as r:
             return r.status, dict(r.headers), r.read()
@@ -98,21 +145,26 @@ def request(url, method="GET", body=None):
 def main():
     work = Path(tempfile.mkdtemp(prefix="ptt-web-test."))
     (work / "fake_chat.py").write_text(FAKE_CHAT)
-    (work / "token").write_text("testtoken1234567\n")
+    console = FakeConsole()
+    threading.Thread(target=console.serve_forever, daemon=True).start()
+    console_port = console.server_address[1]
+    connection = work / "connection.json"
+    connection.write_text(json.dumps({"v": 1, "endpoint": f"ws://127.0.0.1:{console_port}", "token": "optoken-one"}))
     port, redirect_port = free_port(), free_port()
-    base = f"http://127.0.0.1:{port}/testtoken1234567/"
+    base = f"http://127.0.0.1:{port}"
     server = subprocess.Popen(
-        [sys.executable, str(SERVER), "--listen", f"127.0.0.1:{port}", "--token-file", str(work / "token"),
-         "--upload-dir", str(work / "up"), "--idle-reset", "2", "--robot-name", "灵龙",
+        [sys.executable, str(SERVER), "--listen", f"127.0.0.1:{port}", "--operator-connection", str(connection),
+         "--console", f"127.0.0.1:{console_port}", "--upload-dir", str(work / "up"), "--idle-reset", "2",
          "--actions", "wave=挥手,heart=比心",
-         "--redirect-listen", f"127.0.0.1:{redirect_port}", "--redirect-to", base,
+         "--redirect-listen", f"127.0.0.1:{redirect_port}", "--redirect-to", "https://robot.example:8443/",
          "--", sys.executable, str(work / "fake_chat.py"), str(work)],
-        stdout=open(work / "server.log", "w"), stderr=subprocess.STDOUT)
+        stdout=open(work / "server.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
+    token = {"X-Operator-Token": "optoken-one"}
 
-    def api(path, client, method="GET", body=None, since=-1):
+    def api(path, client, method="GET", body=None, since=-1, headers=token):
         extra = f"&since={since}" if path == "status" else ""
-        code, _, data = request(f"{base}api/{path}?client={client}{extra}", method, body)
-        check(code == 200, f"api/{path} -> {code}")
+        code, _, data = request(f"{base}/voice/api/{path}?client={client}{extra}", method, body, headers)
+        check(code == 200, f"voice/api/{path} -> {code}")
         return json.loads(data)
 
     def wait(client, predicate, what, timeout=8):
@@ -131,16 +183,47 @@ def main():
     try:
         wait(a, lambda s: s["ready"], "ptt_chat 就绪")
 
-        # 页面文件、安全头
-        for path, kind in (("", "text/html"), ("app.js", "javascript"), ("style.css", "text/css"),
-                           ("logo.svg", "image/svg+xml")):
-            code, headers, _ = request(base + path)
-            check(code == 200 and kind in headers["Content-Type"], f"{path or 'index'}: {code} {headers}")
-            check("default-src 'self'" in headers["Content-Security-Policy"], f"{path}: 没有 CSP")
-        check(request(f"http://127.0.0.1:{port}/wrongtoken12345/")[0] == 404, "错误 token 应 404")
+        # 控制台页面原样转发，Host 是浏览器看到的（控制台据此做跨站检查）
+        code, _, body = request(base + "/")
+        check(code == 200 and b"<title>console</title>" in body, f"转发首页: {code} {body[:60]}")
+        check(console.seen[-1] == ("/", f"127.0.0.1:{port}"), f"控制台收到的 Host: {console.seen[-1]}")
+        check(request(base + "/nope")[0] == 404, "控制台的 404 原样回来")
 
+        # 只给本机的配对入口一律不转发，伪造成 localhost 的 Host 也不行
+        before = len(console.seen)
+        for target, host in (("/api/v1/local-session", None), ("/api/v1/local-session", f"127.0.0.1:{console_port}"),
+                             ("/api/v1/local-session?x=1", "localhost"), ("/pairing.svg", f"127.0.0.1:{console_port}")):
+            code, _, body = request(base + target, headers={"Host": host} if host else None)
+            check(code == 404 and b"console-secret" not in body, f"{target} Host={host} 应被拦: {code} {body}")
+        check(len(console.seen) == before, f"被拦的请求不该到控制台: {console.seen[before:]}")
+
+        # WebSocket：升级后两头直接对接，来回多次
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as ws:
+            ws.sendall(f"GET /api/v1/ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\n"
+                       f"Connection: Upgrade\r\nSec-WebSocket-Key: x\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
+            head = ws.recv(4096)
+            check(head.startswith(b"HTTP/1.1 101"), f"WebSocket 升级: {head[:40]}")
+            for message in (b"hello", b"renew" * 100):
+                ws.sendall(message)
+                got = b""
+                while len(got) < len(message) + 5:
+                    got += ws.recv(65536)
+                check(got == b"echo:" + message, f"WebSocket 回显: {got[:40]}")
+
+        # 语音面板文件
+        for path, kind in (("panel.js", "javascript"), ("panel.css", "text/css")):
+            code, headers, _ = request(f"{base}/voice/{path}")
+            check(code == 200 and kind in headers["Content-Type"], f"{path}: {code} {headers}")
+        check(request(f"{base}/voice/nope")[0] == 404, "/voice/ 下没有的文件 404，不转发")
+
+        # 语音接口要配对令牌
+        for headers in ({}, {"X-Operator-Token": "wrong"}):
+            code, _, body = request(f"{base}/voice/api/status?client={a}", headers=headers)
+            check(code == 401 and "配对" in json.loads(body)["error"], f"没令牌应 401: {code} {body}")
+            code, _, _ = request(f"{base}/voice/api/press?client={a}", "POST", b"", headers)
+            check(code == 401, f"没令牌按下应 401: {code}")
         info = api("info", a)
-        check(info == {"robot": "灵龙", "actions": ["挥手", "比心"]}, f"api/info: {info}")
+        check(info == {"actions": ["挥手", "比心"]}, f"api/info: {info}")
 
         # 按住互斥
         check(api("press", a, "POST")["ok"], "A 按下")
@@ -196,15 +279,26 @@ def main():
         check(s["resets"] == [2], f"resets: {s['resets']}")
         check("reset" in (work / "commands").read_text().split(), "ptt_chat 应收到 reset")
 
-        # 纯 HTTP 入口跳到页面，带上 back
-        query = "back=http%3A%2F%2F192.168.1.247%3A8765%2F"
-        code, headers, _ = request(f"http://127.0.0.1:{redirect_port}/?{query}")
-        check(code == 302 and headers["Location"] == f"{base}?{query}", f"跳转: {code} {headers.get('Location')}")
-        code, headers, _ = request(f"http://127.0.0.1:{redirect_port}/")
-        check(code == 302 and headers["Location"] == base, f"不带参数的跳转: {headers.get('Location')}")
-    except AssertionError as e:
-        print(f"FAIL: {e}\n--- {work}/server.log ---\n{(work / 'server.log').read_text()}", file=sys.stderr)
-        server.kill()
+        # 重新配对换了令牌：旧令牌失效，新令牌可用
+        time.sleep(0.01)
+        connection.write_text(json.dumps({"v": 1, "endpoint": f"ws://127.0.0.1:{console_port}", "token": "optoken-two"}))
+        code, _, _ = request(f"{base}/voice/api/info?client={a}", headers=token)
+        check(code == 401, f"旧令牌应失效: {code}")
+        check(api("info", a, headers={"X-Operator-Token": "optoken-two"})["actions"], "新令牌可用")
+
+        # 纯 HTTP 入口跳到 HTTPS 页面，带上查询参数（#token= 片段由浏览器自己保留）
+        code, headers, _ = request(f"http://127.0.0.1:{redirect_port}/?mode=voice")
+        check(code == 302 and headers["Location"] == "https://robot.example:8443/?mode=voice", f"跳转: {headers.get('Location')}")
+
+        # 控制台挂了：502，不挂住
+        console.shutdown()
+        console.server_close()
+        code, _, _ = request(base + "/")
+        check(code == 502, f"控制台挂了应 502: {code}")
+    except Exception as e:  # noqa: BLE001  任何失败都要把服务和假 ptt_chat 整组杀掉
+        print(f"FAIL: {type(e).__name__}: {e}\n--- {work}/server.log ---\n{(work / 'server.log').read_text()}",
+              file=sys.stderr)
+        os.killpg(server.pid, signal.SIGKILL)
         sys.exit(1)
 
     server.send_signal(signal.SIGTERM)

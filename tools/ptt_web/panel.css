@@ -1,0 +1,96 @@
+/* 语音面板：挂在机器人控制台页面的 #voice-panel 里，沿用控制台的配色变量（--accent / --ink / --line / --muted）。
+   类名都带 vp- 前缀，不和控制台的样式混。 */
+.voice-panel, .vp-sheet { --vp-stop: #a93834; }
+.vp-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+.voice-panel svg, .vp-sheet svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+
+/* 顶栏 64 + 页面上下留白（下面留给固定的停止栏）：面板正好占满一屏，对话窗口自己滚动 */
+.voice-panel { display: flex; flex-direction: column; height: calc(100dvh - 186px); min-height: 400px; max-width: 860px; margin: 0 auto; }
+.voice-panel[hidden] { display: none; }
+
+/* 对话窗口 */
+.vp-chat { flex: 1; min-height: 0; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfa; overflow: hidden; }
+.vp-chat-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid #e7ebe4; background: #fff; }
+.vp-chat-head h2 { font-size: 14px; }
+.vp-note { font-size: 10px; color: var(--muted); }
+.vp-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 12px; display: flex; flex-direction: column; gap: 10px;
+  -webkit-user-select: text; user-select: text; overscroll-behavior: contain; }
+.vp-msg { display: flex; flex-direction: column; max-width: 84%; }
+.vp-msg.me { align-self: flex-end; align-items: flex-end; }
+.vp-msg.robot { align-self: flex-start; }
+.vp-who { font-size: 10px; color: var(--muted); margin: 0 6px 4px; }
+.vp-bubble { padding: 9px 13px; border-radius: 12px; font-size: 15px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.me .vp-bubble { background: #fff; border: 1px solid #d3dbcc; border-bottom-right-radius: 4px; }
+.me.other .vp-bubble { background: #eef0ec; border-color: #e1e5dd; color: #545c51; }
+.me .vp-bubble.faint { color: var(--muted); }
+.robot .vp-bubble { background: #e9f4d2; border: 1px solid #cfe3a6; border-bottom-left-radius: 4px; }
+.robot.other .vp-bubble { background: #f1f5ea; border-color: #e1e9d3; color: #545c51; }
+.vp-sys { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; margin-left: 4px; font-size: 12px; color: #6f5d24;
+  background: #f8f2e1; border: 1px solid #ebe0bd; padding: 4px 11px; border-radius: 14px; }
+.vp-sys svg { width: 14px; height: 14px; }
+.vp-sys.pending { color: #9a8a55; background: #fbf8ef; border-style: dashed; }
+.vp-sys.error { color: #953d31; background: #fff0ed; border-color: #ebc5bf; }
+.vp-time { align-self: center; font-size: 10px; color: #9aa196; margin-top: 4px; }
+.vp-divider { display: flex; align-items: center; gap: 8px; font-size: 10px; color: var(--muted); margin: 4px 0; }
+.vp-divider::before, .vp-divider::after { content: ""; flex: 1; border-top: 1px dashed #d4dbcd; }
+.vp-cursor { display: inline-block; width: 2px; height: 1.05em; margin-left: 2px; vertical-align: -2px; background: #5b7b1c; animation: vp-blink 1s steps(1) infinite; }
+@keyframes vp-blink { 50% { opacity: .25; } }
+.vp-empty { margin: auto; text-align: center; color: var(--muted); font-size: 13px; line-height: 1.8; }
+
+/* 动作状态：能不能让机器人做动作（控制权、状态） */
+.vp-action { display: flex; align-items: center; gap: 8px; margin: 10px 2px 0; font-size: 12px; color: #7d857a; flex-shrink: 0; }
+.vp-dot { width: 8px; height: 8px; border-radius: 50%; background: #a3aa9f; flex-shrink: 0; }
+.vp-action[data-tone="ok"] { color: #4f6c16; }
+.vp-action[data-tone="ok"] .vp-dot { background: var(--accent); box-shadow: 0 0 0 3px #e4f2c3; }
+.vp-action[data-tone="other"] { color: #8a6d1c; }
+.vp-action[data-tone="other"] .vp-dot { background: #e0b33a; }
+.vp-action[data-tone="busy"] { color: #2f6690; }
+.vp-action[data-tone="busy"] .vp-dot { background: #4a90c2; animation: vp-blink 1s steps(1) infinite; }
+
+/* 动作清单：一行横向滑动，末尾「全部」；做不了动作时变淡 */
+.vp-skills { display: flex; gap: 8px; align-items: center; padding: 8px 0 2px; flex-shrink: 0; }
+.vp-skills[hidden] { display: none; }
+.vp-chips { display: flex; gap: 8px; min-width: 0; }
+.vp-skills .vp-chips { flex: 1; overflow-x: auto; scrollbar-width: none; -webkit-mask-image: linear-gradient(90deg, #000 88%, transparent); mask-image: linear-gradient(90deg, #000 88%, transparent); }
+.vp-skills .vp-chips::-webkit-scrollbar { display: none; }
+.vp-skills:not([data-tone="ok"]) .vp-chips { opacity: .45; }
+.vp-chips.wrap { flex-wrap: wrap; }
+.vp-chip { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; padding: 5px 12px; border: 1px solid #d5dccf; border-radius: 16px;
+  background: #fff; color: #3a4232; font-size: 13px; white-space: nowrap; flex-shrink: 0; }
+button.vp-chip { font-size: 12px; color: #4f6c16; background: #f1f7e3; border-color: #cfe1a8; padding: 5px 11px; min-height: 32px; }
+.vp-chip svg { width: 14px; height: 14px; }
+.vp-examples .vp-chip { background: transparent; border-style: dashed; color: #5f6a58; }
+
+/* 底部：状态 + 按住说话 */
+.vp-dock { display: flex; flex-direction: column; align-items: center; gap: 2px; padding-top: 8px; flex-shrink: 0; }
+.vp-status { margin: 0; min-height: 20px; font-size: 13px; font-weight: 650; color: #496e09; text-align: center; }
+.voice-panel[data-state="busy"] .vp-status { color: #8a6d1c; }
+.voice-panel[data-state="rec"] .vp-status { color: var(--vp-stop); }
+.vp-talk-wrap { height: 124px; display: grid; place-items: center; }  /* 留够录音时放大和光圈的位置，布局不跳 */
+.vp-talk { width: 96px; height: 96px; border-radius: 50%; border: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3px; padding: 0; background: var(--accent); color: #1b2907; box-shadow: 0 0 0 7px #e4f2c3; touch-action: none;
+  -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; transition: transform .1s, background .1s, box-shadow .1s; }
+.vp-talk svg { width: 28px; height: 28px; }
+.vp-talk strong { font-size: 13px; font-weight: 650; }
+.vp-talk.rec { background: var(--vp-stop); color: #fff; transform: scale(1.12); box-shadow: 0 0 0 9px #f0d3d1, 0 0 0 18px #f8e8e7; }
+.vp-talk:disabled { background: #e3e7e0; color: #8b9488; box-shadow: 0 0 0 7px #eef0ec; cursor: not-allowed; }
+.vp-enable { min-width: 180px; min-height: 48px; font-size: 15px; margin: 16px 0 24px; }
+.voice-panel:not([data-state="start"]) .vp-enable, .voice-panel[data-state="start"] .vp-talk-wrap { display: none; }
+
+/* 全部动作：底部弹出 */
+.vp-backdrop, .vp-sheet { display: none; }
+body[data-voice-sheet="open"] .vp-backdrop { display: block; position: fixed; inset: 0; background: #10150e99; z-index: 30; }
+body[data-voice-sheet="open"] .vp-sheet { display: block; position: fixed; left: 0; right: 0; bottom: 0; z-index: 31; background: #fff; border-radius: 14px 14px 0 0;
+  padding: 18px 18px calc(22px + env(safe-area-inset-bottom)); max-width: 760px; margin: 0 auto; max-height: 80dvh; overflow-y: auto; }
+.vp-sheet-head { display: flex; justify-content: space-between; align-items: center; }
+.vp-sheet-note { margin: 12px 0 10px; font-size: 12px; color: var(--muted); }
+
+@media (min-width: 641px) {
+  .vp-talk { width: 108px; height: 108px; }
+  .vp-talk svg { width: 30px; height: 30px; }
+  .vp-talk-wrap { height: 140px; }
+  .vp-skills .vp-chips { flex-wrap: wrap; overflow: visible; -webkit-mask-image: none; mask-image: none; }
+  .vp-skills .vp-more { display: none; }
+  .vp-scroll { padding: 18px 20px; }
+}

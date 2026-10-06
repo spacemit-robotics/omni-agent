@@ -423,12 +423,13 @@ text_chat --llm-url https://api.deepseek.com/v1 --model deepseek-flash \
 
 `--mcp-config` 读的是 `voice_chat` 的 MCP 配置格式（daemon 生成的 `mcp_resolved.json` 就是这种），其中不支持 `null` 值。`--max-tokens` 默认 150，与 daemon 默认一致。
 
-### ptt_chat 与按住说话网页
+### ptt_chat 与机器人控制台的语音模式
 
 `ptt_chat` 不开麦克风，录音由外部提供：stdin 收 `wav <path>`，ASR 识别后走同一个对话流程，用本机扬声器播放。适合展会等嘈杂场合，用手机按住说话代替麦克风阵列和 AEC。
 
 ```text
-手机网页 ──HTTPS──> 反向代理 ──> tools/ptt_web/ptt_server.py ──stdin──> ptt_chat ──> 扬声器 / MCP
+手机 ──HTTPS──> tools/ptt_web/ptt_server.py ──┬─ /voice/ 语音面板、录音 ──stdin──> ptt_chat ──> 扬声器 / MCP
+                                              └─ 其余原样转发（含 WebSocket）──> 机器人控制台（humanoid_common operator_service）
 ```
 
 | stdin 命令 | 作用 |
@@ -441,25 +442,27 @@ text_chat --llm-url https://api.deepseek.com/v1 --model deepseek-flash \
 
 事件（状态、识别结果、边生成边发的回答文字、准备调用 / 已调用的工具、最终回答）写到 `--event-fd`，每行一个 JSON，格式见 `examples/ptt_chat.cpp` 开头。`-o none` 用假播放器，不出声。
 
-`tools/ptt_web/ptt_server.py`（只依赖 Python 标准库）提供网页并管理 `ptt_chat` 子进程：
+`tools/ptt_web/ptt_server.py`（只依赖 Python 标准库）给机器人控制台加语音模式并管理 `ptt_chat` 子进程。手机浏览器只在 HTTPS 页面里允许录音，而控制台是纯 HTTP，所以由本服务给它套一层 HTTPS：控制台网页在安全上下文里从 `/voice/panel.js` 加载语音面板，同一页里切换「控制 | 语音」（控制台那边的改动见 humanoid_common `clients/web`）。
 
 ```bash
 export OPENAI_API_KEY=...
-python3 tools/ptt_web/ptt_server.py --listen 127.0.0.1:18080 --chat-log /tmp/ptt_chat.log -- \
+python3 tools/ptt_web/ptt_server.py --listen "[::]:8443" --tls-cert fullchain.pem --tls-key key.pem \
+    --console 127.0.0.1:8765 --operator-connection ~/.local/state/humanoid-operator/linglong/connection.json \
+    --redirect-listen "[::]:8442" --redirect-to https://<域名>:8443/ --chat-log /tmp/ptt_chat.log -- \
     ptt_chat --llm-url https://api.deepseek.com/v1 --model deepseek-flash --mcp-config mcp.json \
     --llm-extra-body '{"thinking":{"type":"disabled"}}' -o "SPV Composite" --playback-rate 16000 --playback-channels 2
 ```
 
-- 页面和接口都在 `/<token>/` 下，其他路径 404。token 存在 `--token-file`（默认 `~/.config/ptt_web/token`，不存在时生成）；扫码地址即 `https://<域名>/<token>/`。
-- 手机浏览器只在 HTTPS 下允许录音：`--tls-cert` / `--tls-key` 直接提供 HTTPS（局域网用），或只监听本机、由前面的反向代理提供。
-- `--redirect-listen` / `--redirect-to` 另开一个纯 HTTP 端口，所有请求 302 到页面并保留查询参数，给只知道机器人 IP 的页面（如机器人控制台）当入口。
+- `/voice/` 以外的请求原样转发给 `--console`，请求头一字不改（控制台用 Host / Origin 做跨站检查）。控制台只给本机用的 `/api/v1/local-session`、`/pairing.svg` 不转发：经本服务转发时对端就是本机，转发出去等于把配对令牌发给局域网里任何人。
+- 语音接口 `/voice/api/*` 要带控制台的配对令牌（请求头 `X-Operator-Token`，面板从同源 sessionStorage 取），和 `--operator-connection` 连接文件里的一致；重新配对后文件变了自动重读。
+- `--redirect-listen` / `--redirect-to` 另开一个纯 HTTP 端口，所有请求 302 到本服务并保留查询参数：控制台的局域网 HTTP 页面点「语音」经这里跳到 HTTPS 版，令牌和 `mode=voice` 放在 `#` 片段里，不发给服务器。
 - 一次只让一个人按住说话；按下即打断机器人。机器人回答某个人时，别人要等它说完（60 s 后不再保护）。
-- 页面显示最近 30 轮对话（所有人的，别人的标「其他人」），回答边生成边显示，模型决定做动作时先显示「准备做「挥手」」，做了再换成结果。
-- `--robot-name` 是页面上的机器人名字；`--actions key=显示名,...`（和 `humanoid_operator_mcp --actions` 同一格式）列在页面上，告诉用户能让它做什么。
-- 带 `?back=<网址>` 打开时顶栏显示「控制模式 | 语音模式」，可切回该网址（机器人控制台跳过来时带上）。
+- 面板显示最近 30 轮对话（所有人的，别人的标「其他人」），回答边生成边显示，模型决定做动作时先显示「准备做「挥手」」，做了再换成结果。
+- 面板根据控制台广播的状态显示现在能不能让机器人做动作：其他人握着控制权时只能聊天；语音做动作时显示是谁让它做的。语音动作由 MCP 自己申请控制权，控制台切到语音时会放掉本页的控制权。
+- `--actions key=显示名,...`（和 `humanoid_operator_mcp --actions` 同一格式）列在面板上，告诉用户能让它做什么。
 - 录音只保留最近 20 段，放在 `--upload-dir`（默认 `$XDG_RUNTIME_DIR/ptt_web`）。
-- `--idle-reset <秒>` 空闲后清空对话记忆，避免上一位观众的对话带到下一位，页面上画一条分隔线；默认不清。
-- 测试：`python3 tests/test_ptt_web.py`（假 ptt_chat，不需要模型）。
+- `--idle-reset <秒>` 空闲后清空对话记忆，避免上一位观众的对话带到下一位，面板上画一条分隔线；默认不清。
+- 测试：`python3 tests/test_ptt_web.py`（假控制台 + 假 ptt_chat，不需要模型）。
 
 ### 声纹工具
 
