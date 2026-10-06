@@ -20,6 +20,9 @@
  *   {"type":"ready"}
  *   {"type":"state","id":N,"state":"recognizing|thinking|idle"}
  *   {"type":"asr","id":N,"text":"...","ms":268}        text 为空表示没听清
+ *   {"type":"delta","id":N,"text":"..."}               LLM 新输出的一段文字（念之前就发）
+ *   {"type":"tool","id":N,"name":"perform_action","args":{...}}   模型决定调用工具（先播报，播完才真正调用）
+ *   {"type":"tool_result","id":N,"name":"...","text":"已开始做「挥手」。"}
  *   {"type":"reply","id":N,"text":"...","tools":["已开始做「挥手」。"],"interrupted":false}
  *   {"type":"error","id":N,"message":"..."}
  *
@@ -553,6 +556,18 @@ int main(int argc, char* argv[]) {
         return g_barge_in.load() || !g_running.load();
     });
     bool llm_failed = false;  // 只在处理线程里读写
+    uint64_t live_id = 0;     // 正在回答的任务编号，实时事件带上它；只在处理线程里读写
+    ctx.on_llm_text = [&](const std::string& chunk) {
+        emitEvent({{"type", "delta"}, {"id", live_id}, {"text", chunk}});
+    };
+#ifdef USE_MCP
+    ctx.on_tool_call = [&](const std::string& name, const std::string& args) {
+        emitEvent({{"type", "tool"}, {"id", live_id}, {"name", name}, {"args", json::parse(args)}});
+    };
+    ctx.on_tool_result = [&](const std::string& name, const std::string& result) {
+        emitEvent({{"type", "tool_result"}, {"id", live_id}, {"name", name}, {"text", result}});
+    };
+#endif
     ctx.on_llm_error = [&](const std::string&) { llm_failed = true; };
     ctx.llm_error_speech = cfg.llm_error_speech;
 #ifdef USE_MCP
@@ -649,6 +664,7 @@ int main(int argc, char* argv[]) {
 
         emitEvent({{"type", "state"}, {"id", id}, {"state", "thinking"}});
         llm_failed = false;
+        live_id = id;
         processText(ctx, text);
         g_barge_in = false;
         if (llm_failed && !jobs.Stale(*job)) {

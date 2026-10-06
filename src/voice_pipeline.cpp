@@ -291,6 +291,7 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
                     if (!chunk.empty()) {
                         std::cout << chunk << std::flush;
                         full_response += chunk;
+                        if (ctx.on_llm_text) ctx.on_llm_text(chunk);
                         text_buffer.addText(chunk);
 
                         while (text_buffer.hasSentence() && !g_barge_in) {
@@ -345,6 +346,10 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
                                 result.reasoning_content));
                     }
 
+                    if (ctx.on_tool_call) {
+                        for (const auto& call : pending_calls) ctx.on_tool_call(call.name, call.args.dump());
+                    }
+
                     bool spoke_before_tools = false;
                     bool interrupted = false;
                     for (const auto& call : pending_calls) {
@@ -386,6 +391,7 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
                         }
 
                         std::cout << getTimestamp() << " [MCP] 结果: " << result_text << std::endl;
+                        if (ctx.on_tool_result) ctx.on_tool_result(call.name, result_text);
 
                         {
                             std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
@@ -444,6 +450,7 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
                 if (!chunk.empty()) {
                     std::cout << chunk << std::flush;
                     full_response += chunk;
+                    if (ctx.on_llm_text) ctx.on_llm_text(chunk);
                     text_buffer.addText(chunk);
 
                     while (text_buffer.hasSentence() && !g_barge_in) {
