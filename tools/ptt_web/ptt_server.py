@@ -5,13 +5,14 @@
 #
 """机器人控制台的语音对话：给控制台网页提供 HTTPS 和按住说话的语音面板，录音交给 ptt_chat 识别、回答并用本机扬声器播放。
 
-    ptt_server.py --operator-connection FILE [--console 127.0.0.1:8765] [--listen 127.0.0.1:18080]
+    ptt_server.py --operator-connection FILE [--console 127.0.0.1:8765 [--console-overlay DIR]] [--listen 127.0.0.1:18080]
                   [--tls-cert C --tls-key K] [--redirect-listen [::]:8442 --redirect-to URL]
                   [--actions k=名,...] -- ptt_chat ...
 
 手机浏览器只在 HTTPS 页面里允许录音，而机器人控制台（humanoid_common operator_service）是纯 HTTP，所以由本服务
 给它套一层 HTTPS：/voice/ 以外的请求原样转发给 --console（含 WebSocket），控制台网页再从 /voice/panel.js 加载语音面板，
-在同一页里切换「控制 | 语音」。语音接口 /voice/api/* 要带控制台的配对令牌（X-Operator-Token，和 --operator-connection
+在同一页里切换「控制 | 语音」。机器人上部署的控制台还没有这个切换时，--console-overlay 用改好的网页文件代替原文件返回，
+机器人上的文件不用动；只在原文件和改动所基于的版本一致时代替，否则原样转发（控制台照常能用，只是没有语音）。语音接口 /voice/api/* 要带控制台的配对令牌（X-Operator-Token，和 --operator-connection
 连接文件里的一致），没配对的人用不了。
 
 一次只让一个人说；机器人回答某个人时，别人要等它说完。面板显示最近的对话（所有人的），回答边生成边显示；
@@ -19,6 +20,7 @@
 """
 
 import argparse
+import hashlib
 import hmac
 import json
 import os
@@ -40,6 +42,7 @@ STATIC = {"panel.js": ("panel.js", "text/javascript; charset=utf-8"), "panel.css
 # 控制台只给本机用的入口：对端是本机且 Host 是 localhost 时直接发配对令牌（server.cpp）。经本服务转发时对端就是本机，
 # Host 又由请求方决定，转发出去等于把令牌发给局域网里任何人，所以一律不转发。
 BLOCKED = ("/api/v1/local-session", "/pairing.svg")
+MAX_CONSOLE_FILE = 4 * 1024 * 1024
 TUNNEL_IDLE_S = 120           # 转发的连接两头都这么久没数据就断开（控制台的 WebSocket 一直有状态推送）
 MAX_UPLOAD = 2 * 1024 * 1024  # 16 kHz 单声道 16 位约 60 s
 KEEP_UPLOADS = 20
@@ -270,6 +273,37 @@ class OperatorToken:
         return bool(token and presented) and hmac.compare_digest(token.encode(), presented.encode())
 
 
+class ConsoleOverlay:
+    """控制台网页文件的替换：目录里的文件 + base.sha256（每行「原文件 sha256  文件名」，即改动所基于的原文件）。"""
+
+    def __init__(self, directory):
+        directory = Path(directory)
+        self.files = {}  # 请求路径 -> (文件名, 原文件 sha256, 替换内容)
+        for line in (directory / "base.sha256").read_text().splitlines():
+            if not line.strip():
+                continue
+            digest, name = line.split()
+            self.files["/" if name == "index.html" else "/" + name] = (name, digest, (directory / name).read_bytes())
+        self.warned = set()
+
+    def replace(self, target, response):
+        """控制台对 target 的完整响应；原文件和基线一致就换成替换内容，否则原样返回。"""
+        name, digest, content = self.files[target]
+        head, sep, body = response.partition(b"\r\n\r\n")
+        lines = head.split(b"\r\n")
+        if not sep or len(lines[0].split()) < 2 or lines[0].split()[1] != b"200":
+            return response
+        actual = hashlib.sha256(body).hexdigest()
+        if actual != digest:
+            if (name, actual) not in self.warned:
+                self.warned.add((name, actual))
+                log(f"控制台的 {name} 和语音版基于的版本不一致（{actual[:12]}），原样转发：控制台可用，但没有语音入口")
+            return response
+        lines = [line for line in lines if not line.lower().startswith(b"content-length:")]
+        lines.append(b"Content-Length: %d" % len(content))
+        return b"\r\n".join(lines) + b"\r\n\r\n" + content
+
+
 def tunnel(client, upstream):
     """两头双向转发，直到任一头关闭或都闲置 TUNNEL_IDLE_S。单线程 select：TLS 连接不能两个线程同时读写。"""
     for sock in (client, upstream):
@@ -348,7 +382,7 @@ def make_server(listen, handler):
     return Server((host, int(port)), handler)
 
 
-def make_handler(robot, operator_token, console):
+def make_handler(robot, operator_token, console, overlay=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "ptt_web"
         sys_version = ""
@@ -409,9 +443,23 @@ def make_handler(robot, operator_token, console):
                     length = int(self.headers.get("Content-Length") or 0)
                     if 0 < length <= MAX_UPLOAD:
                         upstream.sendall(self.rfile.read(length))
+                    if overlay and self.command == "GET" and self.path in overlay.files:
+                        self._overlay(upstream)
+                        return
                 except (OSError, ValueError):
                     return
                 tunnel(self.connection, upstream)
+
+        def _overlay(self, upstream):
+            """读完控制台的整个响应（每个响应后它都关连接），按需换成改好的网页文件再发给浏览器。"""
+            upstream.settimeout(10)
+            response = b""
+            while len(response) <= MAX_CONSOLE_FILE:
+                data = upstream.recv(65536)
+                if not data:
+                    break
+                response += data
+            self.connection.sendall(overlay.replace(self.path, response))
 
         def do_HEAD(self):
             self._proxy()
@@ -486,6 +534,8 @@ def main():
                              "~/.local/state/humanoid-operator/linglong/connection.json")
     parser.add_argument("--console", default=None,
                         help="机器人控制台 HOST:PORT，/voice/ 以外的请求转发过去，例如 127.0.0.1:8765 (默认: 不转发)")
+    parser.add_argument("--console-overlay", default=None,
+                        help="控制台网页替换目录（make_console_overlay.py 生成）：原文件和 base.sha256 一致时代替原文件返回")
     parser.add_argument("--upload-dir", default=None,
                         help=f"录音存放目录，只留最近 {KEEP_UPLOADS} 段 (默认: $XDG_RUNTIME_DIR/ptt_web)")
     parser.add_argument("--max-hold", type=int, default=15, help="最长按住秒数 (默认: 15)")
@@ -519,12 +569,13 @@ def main():
         if not host or not port.isdigit():
             parser.error("--console 要写成 HOST:PORT")
         console = (host.strip("[]"), int(port))
+    overlay = ConsoleOverlay(args.console_overlay) if args.console_overlay else None  # 目录不对在拉起 ptt_chat 前就报错
     upload_dir = Path(args.upload_dir or os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "ptt_web"))
     upload_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     actions = dict(item.split("=", 1) if "=" in item else (item, item)
                    for item in (part.strip() for part in args.actions.split(",")) if item)
     robot = Robot(command, upload_dir, args.max_hold, args.idle_reset, args.chat_log, actions)
-    server = make_server(args.listen, make_handler(robot, OperatorToken(args.operator_connection), console))
+    server = make_server(args.listen, make_handler(robot, OperatorToken(args.operator_connection), console, overlay))
     redirect = None
     if args.redirect_listen:
         redirect = make_server(args.redirect_listen, make_redirect_handler(args.redirect_to))

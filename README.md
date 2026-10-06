@@ -454,6 +454,7 @@ python3 tools/ptt_web/ptt_server.py --listen "[::]:8443" --tls-cert fullchain.pe
 ```
 
 - `/voice/` 以外的请求原样转发给 `--console`，请求头一字不改（控制台用 Host / Origin 做跨站检查）。控制台只给本机用的 `/api/v1/local-session`、`/pairing.svg` 不转发：经本服务转发时对端就是本机，转发出去等于把配对令牌发给局域网里任何人。
+- `--console-overlay <目录>`：机器人上部署的控制台网页还没有「控制 | 语音」时，用目录里改好的文件代替返回，机器人上的文件不动。`base.sha256` 记着改之前那一版的哈希，控制台返回的内容和它一致才替换；对不上（控制台升级了）就原样转发，日志里提示一次。目录用 `tools/ptt_web/make_console_overlay.py <humanoid_common 仓库> <输出目录> [--patched 分支]` 生成：取改好的分支相对它和 main 分叉点改过的 `clients/web` 文件。
 - 语音接口 `/voice/api/*` 要带控制台的配对令牌（请求头 `X-Operator-Token`，面板从同源 sessionStorage 取），和 `--operator-connection` 连接文件里的一致；重新配对后文件变了自动重读。
 - `--redirect-listen` / `--redirect-to` 另开一个纯 HTTP 端口，所有请求 302 到本服务并保留查询参数：控制台的局域网 HTTP 页面点「语音」经这里跳到 HTTPS 版，令牌和 `mode=voice` 放在 `#` 片段里，不发给服务器。
 - 一次只让一个人按住说话；按下即打断机器人。机器人回答某个人时，别人要等它说完（60 s 后不再保护）。

@@ -3,12 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """ptt_server.py 端到端测试：假的机器人控制台 + 假的 ptt_chat，检查转发和语音面板拿到的对话状态。
 
-转发：控制台页面原样转发（Host 不改）、只给本机的配对入口不转发（伪造 Host 也不行）、WebSocket 双向转发
+转发：控制台页面原样转发（Host 不改）、替换网页文件只在原文件和基线一致时生效（他们升级后原样转发）、只给本机的配对入口不转发（伪造 Host 也不行）、WebSocket 双向转发
 （明文和 TLS 各一遍，TLS 下用跨多个记录的大消息）、控制台挂了回 502。
 语音：面板文件、接口要带配对令牌（重新配对后旧令牌失效）、按住互斥、回答别人时不让按、边生成边显示、
 准备做动作 → 已做、被打断时留下已显示的文字、空闲清空记忆的分隔标记、纯 HTTP 跳转带上查询参数、退出时让 ptt_chat 退出。
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -86,6 +87,7 @@ class FakeConsole(socketserver.ThreadingTCPServer):
 
     def __init__(self):
         self.seen = []  # (目标, Host)
+        self.index = b"<!doctype html><title>console</title>"
         super().__init__(("127.0.0.1", 0), FakeConsoleHandler)
 
 
@@ -112,7 +114,7 @@ class FakeConsoleHandler(socketserver.StreamRequestHandler):
         if target == "/api/v1/local-session":
             body = b'{"token":"console-secret"}'  # 真的服务对本机对端 + localhost Host 才发；这里一律发，看代理拦不拦
         elif target == "/" and method == "GET":
-            body = b"<!doctype html><title>console</title>"
+            body = self.server.index
         else:
             self.wfile.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return
@@ -150,13 +152,20 @@ def main():
     console = FakeConsole()
     threading.Thread(target=console.serve_forever, daemon=True).start()
     console_port = console.server_address[1]
+    # 替换网页：首页的基线是假控制台现在的首页；app.js 的基线随便写（假控制台对它回 404，应原样转发）
+    overlay = work / "overlay"
+    overlay.mkdir()
+    (overlay / "index.html").write_bytes(b"<!doctype html><title>voice console</title>")
+    (overlay / "app.js").write_bytes(b"// voice")
+    (overlay / "base.sha256").write_text(f"{hashlib.sha256(console.index).hexdigest()}  index.html\n{'0' * 64}  app.js\n")
     connection = work / "connection.json"
     connection.write_text(json.dumps({"v": 1, "endpoint": f"ws://127.0.0.1:{console_port}", "token": "optoken-one"}))
     port, redirect_port = free_port(), free_port()
     base = f"http://127.0.0.1:{port}"
     server = subprocess.Popen(
         [sys.executable, str(SERVER), "--listen", f"127.0.0.1:{port}", "--operator-connection", str(connection),
-         "--console", f"127.0.0.1:{console_port}", "--upload-dir", str(work / "up"), "--idle-reset", "2",
+         "--console", f"127.0.0.1:{console_port}", "--console-overlay", str(overlay),
+         "--upload-dir", str(work / "up"), "--idle-reset", "2",
          "--actions", "wave=挥手,heart=比心",
          "--redirect-listen", f"127.0.0.1:{redirect_port}", "--redirect-to", "https://robot.example:8443/",
          "--", sys.executable, str(work / "fake_chat.py"), str(work)],
@@ -199,11 +208,19 @@ def main():
     try:
         wait(a, lambda s: s["ready"], "ptt_chat 就绪")
 
-        # 控制台页面原样转发，Host 是浏览器看到的（控制台据此做跨站检查）
-        code, _, body = request(base + "/")
-        check(code == 200 and b"<title>console</title>" in body, f"转发首页: {code} {body[:60]}")
+        # 控制台页面原样转发，Host 是浏览器看到的（控制台据此做跨站检查）；首页和基线一致，换成语音版
+        code, headers, body = request(base + "/")
+        check(code == 200 and body == b"<!doctype html><title>voice console</title>", f"替换首页: {code} {body[:60]}")
+        check(headers["Content-Length"] == str(len(body)), f"替换后长度: {headers}")
         check(console.seen[-1] == ("/", f"127.0.0.1:{port}"), f"控制台收到的 Host: {console.seen[-1]}")
         check(request(base + "/nope")[0] == 404, "控制台的 404 原样回来")
+        check(request(base + "/app.js")[0] == 404, "要替换的文件控制台回 404 时原样回来")
+        # 他们升级了首页：和基线对不上，原样转发（没有语音，但控制台能用），日志里提醒
+        console.index = b"<!doctype html><title>console v2</title>"
+        code, _, body = request(base + "/")
+        check(code == 200 and body == console.index, f"基线对不上应原样转发: {body[:60]}")
+        check("不一致" in (work / "server.log").read_text(), "基线对不上要记日志")
+        console.index = b"<!doctype html><title>console</title>"
 
         # 只给本机的配对入口一律不转发，伪造成 localhost 的 Host 也不行
         before = len(console.seen)
