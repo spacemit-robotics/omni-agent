@@ -7,6 +7,7 @@
 （明文和 TLS 各一遍，TLS 下用跨多个记录的大消息）、控制台挂了回 502。
 语音：面板文件、接口要带配对令牌（重新配对后旧令牌失效）、按住互斥、回答别人时不让按、边生成边显示、
 准备做动作 → 已做、被打断时留下已显示的文字、空闲清空记忆的分隔标记、纯 HTTP 跳转带上查询参数、退出时让 ptt_chat 退出。
+ptt_chat 起不来或中途退出（比如没网）：控制台照常转发，语音显示不可用，隔一会儿重启；重启后对话编号接着排。
 """
 
 import hashlib
@@ -76,6 +77,31 @@ for line in sys.stdin:
         emit(type="delta", id=turn, text="从前有")
         emit(type="reply", id=turn, text="", tools=[], interrupted=True)
     emit(type="state", id=turn, state="idle")
+'''
+
+# 起不来、做完一轮就退出的 ptt_chat：work/fail 存在时直接失败（像开机没网时连不上大模型）；回答里带上总共第几轮
+CRASHY_CHAT = r'''
+import json, os, sys
+work = sys.argv[1]
+out = os.fdopen(int(sys.argv[sys.argv.index("--event-fd") + 1]), "w", buffering=1)
+def emit(**event):
+    out.write(json.dumps(event, ensure_ascii=False) + "\n")
+with open(os.path.join(work, "starts"), "a") as f:
+    f.write("x")
+if os.path.exists(os.path.join(work, "fail")):
+    sys.exit(1)
+emit(type="ready")
+for line in sys.stdin:
+    if not line.startswith("wav "):
+        continue
+    count = os.path.join(work, "count")
+    n = int(open(count).read()) + 1 if os.path.exists(count) else 1
+    open(count, "w").write(str(n))
+    emit(type="state", id=1, state="recognizing")
+    emit(type="asr", id=1, text=f"第{n}句", ms=10)
+    emit(type="reply", id=1, text=f"第{n}次回答", tools=[], interrupted=False)
+    emit(type="state", id=1, state="idle")
+    sys.exit(3)
 '''
 
 
@@ -384,7 +410,85 @@ def main():
     commands = (work / "commands").read_text().split()
     check(code == 0 and commands[-1] == "quit", f"退出: code {code}, 命令 {commands}")
     shutil.rmtree(work)
+    restart_checks()
     print("ptt_web: all checks passed")
+
+
+def restart_checks():
+    work = Path(tempfile.mkdtemp(prefix="ptt-web-restart."))
+    (work / "chat.py").write_text(CRASHY_CHAT)
+    (work / "fail").touch()
+    console = FakeConsole()
+    threading.Thread(target=console.serve_forever, daemon=True).start()
+    connection = work / "connection.json"
+    connection.write_text(json.dumps({"v": 1, "endpoint": f"ws://127.0.0.1:{console.server_address[1]}", "token": "t"}))
+    port = free_port()
+    base = f"http://127.0.0.1:{port}"
+    server = subprocess.Popen(
+        [sys.executable, str(SERVER), "--listen", f"127.0.0.1:{port}", "--operator-connection", str(connection),
+         "--console", f"127.0.0.1:{console.server_address[1]}", "--upload-dir", str(work / "up"),
+         "--restart-delay", "0.3", "--", sys.executable, str(work / "chat.py"), str(work)],
+        stdout=open(work / "server.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
+    token = {"X-Operator-Token": "t"}
+
+    def status():
+        code, _, data = request(f"{base}/voice/api/status?client=restartcli01&since=-1", headers=token)
+        check(code == 200, f"status -> {code}")
+        return json.loads(data)
+
+    def wait(predicate, what, timeout=8):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                s = status()
+                if predicate(s):
+                    return s
+            except (OSError, AssertionError):
+                pass
+            time.sleep(0.05)
+        raise AssertionError(f"等不到: {what}")
+
+    def talk():
+        code, _, data = request(f"{base}/voice/api/press?client=restartcli01", "POST", b"", token)
+        check(code == 200 and json.loads(data)["ok"], f"按下: {data}")
+        code, _, data = request(f"{base}/voice/api/audio?client=restartcli01", "POST", WAV, token)
+        check(code == 200 and json.loads(data)["ok"], f"上传: {data}")
+        return json.loads(data)["id"]
+
+    try:
+        # 一直起不来：一直在重启，控制台照常转发，语音显示不可用、不让按
+        deadline = time.monotonic() + 8
+        while len((work / "starts").read_text() if (work / "starts").exists() else "") < 3:
+            check(time.monotonic() < deadline, "ptt_chat 起不来时应反复重启")
+            time.sleep(0.05)
+        code, _, body = request(base + "/")
+        check(code == 200 and body == console.index, f"ptt_chat 起不来时控制台照常转发: {code}")
+        s = status()
+        check(not s["ready"], f"起不来时语音不可用: {s}")
+        code, _, data = request(f"{base}/voice/api/press?client=restartcli01", "POST", b"", token)
+        check(code == 200 and not json.loads(data)["ok"], f"起不来时不让按: {data}")
+
+        # 网络好了：下一次重启就起来；一轮之后它退出、再重启，第二轮的编号接着排，不覆盖第一轮
+        (work / "fail").unlink()
+        wait(lambda s: s["ready"], "恢复后 ptt_chat 就绪")
+        check(talk() == 1, "第一轮编号 1")
+        s = wait(lambda s: s["history"] and s["history"][-1]["reply"], "第一轮回答")
+        check([t["reply"] for t in s["history"]] == ["第1次回答"], f"第一轮: {s['history']}")
+        wait(lambda s: s["ready"] and not s["holder"], "退出后重启就绪")
+        check(talk() == 2, "重启后编号接着排")
+        s = wait(lambda s: len(s["history"]) == 2 and s["history"][-1]["reply"], "第二轮回答")
+        check([(t["id"], t["heard"], t["reply"]) for t in s["history"]] == [(1, "第1句", "第1次回答"), (2, "第2句", "第2次回答")],
+              f"重启前后的对话: {s['history']}")
+    except Exception as e:  # noqa: BLE001
+        print(f"FAIL: {type(e).__name__}: {e}\n--- {work}/server.log ---\n{(work / 'server.log').read_text()}",
+              file=sys.stderr)
+        os.killpg(server.pid, signal.SIGKILL)
+        sys.exit(1)
+    server.send_signal(signal.SIGTERM)
+    check(server.wait(timeout=10) == 0, "重启过的服务也能正常退出")
+    console.shutdown()
+    console.server_close()
+    shutil.rmtree(work)
 
 
 if __name__ == "__main__":

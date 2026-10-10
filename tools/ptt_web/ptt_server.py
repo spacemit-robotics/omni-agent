@@ -46,7 +46,6 @@ MAX_CONSOLE_FILE = 4 * 1024 * 1024
 TUNNEL_IDLE_S = 120           # 转发的连接两头都这么久没数据就断开（控制台的 WebSocket 一直有状态推送）
 MAX_UPLOAD = 2 * 1024 * 1024  # 16 kHz 单声道 16 位约 60 s
 KEEP_UPLOADS = 20
-RESTART_S = 15                # ptt_chat 退出后（比如开机时还没网，连不上大模型）隔这么久重启；控制台转发不受影响
 ACTION_TOOLS = ("perform_action", "stop_action")  # 让机器人动的工具；其余（查天气、时间）只在查询时提示一下
 KEEP_TURNS = 30               # 页面上能往回翻的轮数
 
@@ -58,8 +57,9 @@ def log(message):
 class Robot:
     """ptt_chat 子进程和对话状态。所有状态由 cond 保护，seq 每次变化加一，供长轮询等待。"""
 
-    def __init__(self, command, upload_dir, max_hold_s, idle_reset_s, chat_log, actions=None):
+    def __init__(self, command, upload_dir, max_hold_s, idle_reset_s, chat_log, actions=None, restart_s=15):
         self.actions = actions or {}  # 动作键 -> 显示名
+        self.restart_s = restart_s    # ptt_chat 退出后（比如开机时还没网，连不上大模型）隔这么久重启；控制台转发不受影响
         self.upload_dir = upload_dir
         self.max_hold_s = max_hold_s
         self.idle_reset_s = idle_reset_s
@@ -108,8 +108,8 @@ class Robot:
             if self.stopping:
                 log(f"ptt_chat 退出 (code {code})")
                 return
-            log(f"ptt_chat 退出 (code {code})，{RESTART_S} s 后重启；控制台照常可用")
-            time.sleep(RESTART_S)
+            log(f"ptt_chat 退出 (code {code})，{self.restart_s} s 后重启；控制台照常可用")
+            time.sleep(self.restart_s)
             if self.stopping:
                 return
             with self.cond:
@@ -590,6 +590,8 @@ def main():
     parser.add_argument("--upload-dir", default=None,
                         help=f"录音存放目录，只留最近 {KEEP_UPLOADS} 段 (默认: $XDG_RUNTIME_DIR/ptt_web)")
     parser.add_argument("--max-hold", type=int, default=15, help="最长按住秒数 (默认: 15)")
+    parser.add_argument("--restart-delay", type=float, default=15,
+                        help="ptt_chat 退出后隔多少秒重启，期间控制台照常转发 (默认: 15)")
     parser.add_argument("--idle-reset", type=int, default=0, help="空闲多少秒后清空对话记忆，0 不清 (默认: 0)")
     parser.add_argument("--chat-log", default=None, help="ptt_chat 的输出写到这个文件 (默认: 和本服务同一个输出)")
     parser.add_argument("--tls-cert", default=None, help="HTTPS 证书链 (PEM)，和 --tls-key 一起给")
@@ -625,7 +627,7 @@ def main():
     upload_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     actions = dict(item.split("=", 1) if "=" in item else (item, item)
                    for item in (part.strip() for part in args.actions.split(",")) if item)
-    robot = Robot(command, upload_dir, args.max_hold, args.idle_reset, args.chat_log, actions)
+    robot = Robot(command, upload_dir, args.max_hold, args.idle_reset, args.chat_log, actions, args.restart_delay)
     server = make_server(args.listen, make_handler(robot, OperatorToken(args.operator_connection), console, overlay))
     redirect = None
     if args.redirect_listen:

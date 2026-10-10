@@ -29,7 +29,7 @@ tests:
       bash application/native/omni_agent/tests/test_tool_speech.sh
 
   - name: omni-agent-ptt-web
-    description: Verifies the console voice server against a fake operator console and fake ptt_chat - verbatim proxying incl. WebSocket, local-only pairing endpoints never forwarded, pairing-token auth on the voice API, shared history, streamed replies, pending then performed actions, idle-reset marker and press locking.
+    description: Verifies the console voice server against a fake operator console and fake ptt_chat - verbatim proxying incl. WebSocket, local-only pairing endpoints never forwarded, pairing-token auth on the voice API, shared history, streamed replies, pending then performed actions, idle-reset marker, press locking, and serving the console while ptt_chat cannot start, restarting it with turn numbers continuing.
     category: functional
     scopes: [pr]
     timeout_s: 60
