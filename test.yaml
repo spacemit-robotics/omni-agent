@@ -36,3 +36,12 @@ tests:
     workdir: sdk
     command: |
       python3 application/native/omni_agent/tests/test_ptt_web.py
+
+  - name: omni-agent-info-mcp
+    description: Verifies the time/weather MCP server against a fake Open-Meteo - handshake and version fallback, tools/list, get_time format, default city without geocoding, other cities via geocoding, cache, unknown city, unreachable service and malformed data.
+    category: functional
+    scopes: [pr]
+    timeout_s: 60
+    workdir: sdk
+    command: |
+      python3 application/native/omni_agent/tests/test_info_mcp.py

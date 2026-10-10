@@ -464,6 +464,18 @@ python3 tools/ptt_web/ptt_server.py --listen "[::]:8443" --tls-cert fullchain.pe
 - 录音只保留最近 20 段，放在 `--upload-dir`（默认 `$XDG_RUNTIME_DIR/ptt_web`）。
 - `--idle-reset <秒>` 空闲后清空对话记忆，避免上一位观众的对话带到下一位，面板上画一条分隔线；默认不清。
 - 测试：`python3 tests/test_ptt_web.py`（假控制台 + 假 ptt_chat，不需要模型）。
+- 面板只把让机器人动的工具（`perform_action`、`stop_action`）显示成「准备做 / 已开始做」；查天气、时间这类工具只在查询时提示「正在查深圳的天气…」，结果由机器人说出来。
+
+### 时间和天气（tools/info_mcp）
+
+`tools/info_mcp/info_mcp.py` 是一个 stdio MCP 服务（只依赖 Python 标准库），给模型两个工具：`get_time`（本机时钟的日期、星期、时间）和 `get_weather`（城市现在的天气和今天的气温范围，数据来自免费、不要密钥的 Open-Meteo；不给城市查 `--default-city`，给了 `--default-location` 就不用查坐标；同一地点 10 分钟内复用）。接进 `mcp.json`：
+
+```json
+{"name": "Info", "type": "stdio", "command": "python3",
+ "args": ["<SDK>/application/native/omni_agent/tools/info_mcp/info_mcp.py", "--default-city", "深圳", "--default-location", "22.5431,114.0579"]}
+```
+
+测试：`python3 tests/test_info_mcp.py`（假的 Open-Meteo，不联网）。
 
 ### 声纹工具
 

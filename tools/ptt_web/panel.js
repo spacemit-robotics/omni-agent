@@ -231,6 +231,7 @@
       if (text || streaming) {
         items.push(bubble('robot', other, name, text, streaming ? (b) => b.append(el('span', 'vp-cursor')) : null));
       }
+      (t.lookups || []).forEach((p) => items.push(sys('pending', '', p + '…')));
       t.pending.forEach((p) => items.push(sys('pending', 'hand', p + '…')));
       t.tools.forEach((r) => {  // 失败的工具结果语音流水线会加「错误: 」前缀（voice_pipeline.cpp），用错误样式显示
         const failed = /^错误[:：]\s*/.exec(r);

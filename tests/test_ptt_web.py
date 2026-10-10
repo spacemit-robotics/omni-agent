@@ -61,11 +61,15 @@ for line in sys.stdin:
         emit(type="delta", id=1, text="好的，")
         gate("gate-a")
         emit(type="delta", id=1, text="我来挥手。")
+        emit(type="tool", id=1, name="get_weather", args={"city": "深圳"})
+        gate("gate-w")
+        emit(type="tool_result", id=1, name="get_weather", text="深圳现在晴，气温 30 度。")
         emit(type="tool", id=1, name="perform_action", args={"action": "wave"})
         gate("gate-b")
         emit(type="tool_result", id=1, name="perform_action", text="已开始做「挥手」。")
         gate("gate-c")
-        emit(type="reply", id=1, text="好的，我来挥手。", tools=["已开始做「挥手」。"], interrupted=False)
+        emit(type="reply", id=1, text="好的，我来挥手。", tools=["深圳现在晴，气温 30 度。", "已开始做「挥手」。"],
+             interrupted=False)
     else:
         emit(type="asr", id=turn, text="讲个笑话", ms=90)
         emit(type="state", id=turn, state="thinking")
@@ -307,11 +311,18 @@ def main():
         r = api("press", b, "POST")
         check(not r["ok"] and "回答别人" in r["error"], f"回答 A 时 B 应被拒: {r}")
 
-        # 模型决定做动作：先显示「准备做」，做了之后变成结果
+        # 查天气只在查询时提示，结果不显示（机器人会说出来）
         (work / "gate-a").touch()
+        s = wait(a, lambda s: s["history"][-1]["lookups"], "查天气")
+        turn = s["history"][-1]
+        check(turn["lookups"] == ["正在查深圳的天气"] and not turn["pending"] and not turn["tools"], f"查询中: {turn}")
+
+        # 模型决定做动作：先显示「准备做」，做了之后变成结果
+        (work / "gate-w").touch()
         s = wait(a, lambda s: s["history"][-1]["pending"], "准备做动作")
         turn = s["history"][-1]
-        check(turn["pending"] == ["准备做「挥手」"] and turn["live"] == "好的，我来挥手。", f"pending: {turn}")
+        check(turn["pending"] == ["准备做「挥手」"] and turn["live"] == "好的，我来挥手。" and not turn["lookups"]
+              and not turn["tools"], f"pending: {turn}")
         (work / "gate-b").touch()
         s = wait(a, lambda s: s["history"][-1]["tools"], "动作结果")
         turn = s["history"][-1]

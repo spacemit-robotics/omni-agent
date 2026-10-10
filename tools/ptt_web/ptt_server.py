@@ -46,6 +46,7 @@ MAX_CONSOLE_FILE = 4 * 1024 * 1024
 TUNNEL_IDLE_S = 120           # 转发的连接两头都这么久没数据就断开（控制台的 WebSocket 一直有状态推送）
 MAX_UPLOAD = 2 * 1024 * 1024  # 16 kHz 单声道 16 位约 60 s
 KEEP_UPLOADS = 20
+ACTION_TOOLS = ("perform_action", "stop_action")  # 让机器人动的工具；其余（查天气、时间）只在查询时提示一下
 KEEP_TURNS = 30               # 页面上能往回翻的轮数
 
 
@@ -69,7 +70,7 @@ class Robot:
         self.holder = None          # 正在按住说话的客户端
         self.hold_until = 0.0
         self.next_id = 0            # 和 ptt_chat 的任务编号一一对应：只有 wav 命令会占号
-        self.turns = {}             # id -> {owner, heard, live, reply, pending, tools, started, wall}
+        self.turns = {}             # id -> {owner, heard, live, reply, pending, lookups, tools, started, wall}
         self.resets = []            # 空闲清空记忆时最后一轮的编号，页面在它后面画分隔线
         self.last_activity = time.monotonic()
         read_fd, write_fd = os.pipe()
@@ -111,21 +112,30 @@ class Robot:
                         self.state = event.get("state", "idle")
                     if event.get("state") == "idle" and turn is not None:
                         turn["pending"] = []
+                        turn["lookups"] = []
                 elif kind == "asr" and turn is not None:
                     turn["heard"] = event.get("text", "")
                     log(f"#{event['id']} 识别 {event.get('ms')} ms: {turn['heard']!r}")
                 elif kind == "delta" and turn is not None:
                     turn["live"] += event.get("text", "")
                 elif kind == "tool" and turn is not None:
-                    turn["pending"].append(self._tool_label(event.get("name", ""), event.get("args")))
+                    name = event.get("name", "")
+                    if name in ACTION_TOOLS:
+                        turn["pending"].append(self._tool_label(name, event.get("args")))
+                    else:
+                        turn["lookups"].append(self._lookup_label(name, event.get("args")))
                 elif kind == "tool_result" and turn is not None:
-                    if turn["pending"]:
-                        turn["pending"].pop(0)
-                    turn["tools"].append(event.get("text", ""))
+                    if event.get("name", "") in ACTION_TOOLS:
+                        if turn["pending"]:
+                            turn["pending"].pop(0)
+                        turn["tools"].append(event.get("text", ""))
+                    elif turn["lookups"]:
+                        turn["lookups"].pop(0)
                 elif kind == "reply" and turn is not None:
+                    # 动作结果已经随 tool_result 记下；reply 里的 tools 还含查询结果（机器人会说出来），不再显示
                     turn["reply"] = event.get("text", "")
-                    turn["tools"] = event.get("tools", [])
                     turn["pending"] = []
+                    turn["lookups"] = []
                     turn["interrupted"] = event.get("interrupted", False)
                     log(f"#{event['id']} 回答: {turn['reply']!r} {turn['tools']}")
                 elif kind == "error" and turn is not None:
@@ -163,6 +173,15 @@ class Robot:
         if name == "stop_action":
             return "准备停止动作"
         return f"准备调用 {name}"
+
+    @staticmethod
+    def _lookup_label(name, args):
+        if name == "get_weather":
+            city = str(args.get("city", "")) if isinstance(args, dict) else ""
+            return f"正在查{city}的天气" if city else "正在查天气"
+        if name == "get_time":
+            return "正在看时间"
+        return f"正在查询 {name}"
 
     def _holder_active(self):
         if self.holder is not None and time.monotonic() > self.hold_until:
@@ -210,7 +229,7 @@ class Robot:
             stale.unlink(missing_ok=True)
             self.turns = {k: v for k, v in self.turns.items() if k > turn_id - KEEP_TURNS}
             self.turns[turn_id] = {"owner": client, "heard": None, "live": "", "reply": None, "pending": [],
-                                   "tools": [], "started": time.monotonic(), "wall": time.time()}
+                                   "lookups": [], "tools": [], "started": time.monotonic(), "wall": time.time()}
             self.state = "recognizing"
             self.holder = None
             self._send(f"wav {path}")
@@ -226,7 +245,8 @@ class Robot:
             holder = self._holder_active()
             now = time.time()
             history = [{"id": k, "mine": t["owner"] == client, "heard": t["heard"], "live": t["live"],
-                        "reply": t["reply"], "pending": list(t["pending"]), "tools": list(t["tools"]),
+                        "reply": t["reply"], "pending": list(t["pending"]), "lookups": list(t["lookups"]),
+                        "tools": list(t["tools"]),
                         "error": t.get("error"), "interrupted": t.get("interrupted", False),
                         "ago_s": int(now - t["wall"])}
                        for k, t in sorted(self.turns.items())]
