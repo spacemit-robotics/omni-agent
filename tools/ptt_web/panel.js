@@ -119,7 +119,7 @@
     if (denied) return '请先扫码配对机器人，才能语音对话';
     if (offline) return '连不上语音服务，正在重试…';
     if (!status) return '正在连接…';
-    if (!status.alive) return '语音服务已停止';
+    if (!status.alive) return '语音暂时用不了（可能是机器人没联网），正在重试…';
     if (!status.ready) return '语音服务正在启动…';
     if (status.holder === 'other') return '别人正在说话，请稍等';
     const turn = liveTurn(), mine = !!turn && turn.mine;
