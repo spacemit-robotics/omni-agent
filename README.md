@@ -468,7 +468,7 @@ python3 tools/ptt_web/ptt_server.py --listen "[::]:8443" --tls-cert fullchain.pe
 
 ### 时间和天气（tools/info_mcp）
 
-`tools/info_mcp/info_mcp.py` 是一个 stdio MCP 服务（只依赖 Python 标准库），给模型两个工具：`get_time`（本机时钟的日期、星期、时间）和 `get_weather`（城市现在的天气和今天的气温范围，数据来自免费、不要密钥的 Open-Meteo；不给城市查 `--default-city`，给了 `--default-location` 就不用查坐标；同一地点 10 分钟内复用）。接进 `mcp.json`：
+`tools/info_mcp/info_mcp.py` 是一个 stdio MCP 服务（只依赖 Python 标准库），给模型两个工具：`get_time`（本机时钟的日期、星期、时间）和 `get_weather`（城市现在的天气和今天的气温范围，数据来自免费、不要密钥的 Open-Meteo；不给城市查 `--default-city`；默认城市用 `--default-location`、国内主要城市用内置坐标，其余经 Open-Meteo 地理编码查坐标；每个请求失败重试一次，同一地点 10 分钟内复用）。接进 `mcp.json`：
 
 ```json
 {"name": "Info", "type": "stdio", "command": "python3",

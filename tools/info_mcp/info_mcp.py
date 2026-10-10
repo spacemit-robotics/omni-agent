@@ -9,8 +9,9 @@
 
 工具：
   get_time      现在的日期、星期和时间（本机时钟，--timezone 时区）
-  get_weather   某个城市现在的天气和今天的气温范围；不给城市就查 --default-city。数据来自 Open-Meteo（免费、不要密钥），
-                城市名经它的地理编码查坐标；默认城市直接用 --default-location，省一次请求。同一地点 10 分钟内复用结果。
+  get_weather   某个城市现在的天气和今天的气温范围；不给城市就查 --default-city。数据来自 Open-Meteo（免费、不要密钥）。
+                默认城市用 --default-location，国内主要城市用内置坐标，其余经 Open-Meteo 地理编码查坐标。
+                机器人走 4G 访问境外服务器时偶尔握手卡住，每个请求失败后重试一次；同一地点 10 分钟内复用结果。
 
 mcp.json 里这样接：{"name": "Info", "type": "stdio", "command": "python3", "args": ["<本文件>", "--default-city", "深圳", ...]}
 """
@@ -38,6 +39,21 @@ WEATHER_CODES = {
     71: "小雪", 73: "中雪", 75: "大雪", 77: "米雪",
     80: "阵雨", 81: "强阵雨", 82: "暴雨", 85: "阵雪", 86: "强阵雪",
     95: "雷阵雨", 96: "雷阵雨伴有冰雹", 99: "强雷阵雨伴有冰雹",
+}
+# 国内主要城市的坐标（纬度, 经度），常问的城市不用再查地理编码
+CITIES = {
+    "北京": (39.90, 116.41), "上海": (31.23, 121.47), "广州": (23.13, 113.26), "深圳": (22.54, 114.06),
+    "天津": (39.13, 117.20), "重庆": (29.56, 106.55), "杭州": (30.27, 120.16), "南京": (32.06, 118.80),
+    "苏州": (31.30, 120.59), "无锡": (31.49, 120.31), "宁波": (29.87, 121.54), "成都": (30.57, 104.07),
+    "武汉": (30.59, 114.31), "西安": (34.34, 108.94), "长沙": (28.23, 112.94), "郑州": (34.75, 113.63),
+    "青岛": (36.07, 120.38), "济南": (36.65, 117.12), "合肥": (31.82, 117.23), "厦门": (24.48, 118.09),
+    "福州": (26.07, 119.30), "南昌": (28.68, 115.86), "沈阳": (41.81, 123.43), "大连": (38.91, 121.61),
+    "哈尔滨": (45.80, 126.53), "长春": (43.82, 125.32), "石家庄": (38.04, 114.51), "太原": (37.87, 112.55),
+    "呼和浩特": (40.84, 111.75), "昆明": (25.04, 102.71), "贵阳": (26.65, 106.63), "南宁": (22.82, 108.37),
+    "海口": (20.04, 110.20), "三亚": (18.25, 109.51), "拉萨": (29.65, 91.14), "乌鲁木齐": (43.83, 87.62),
+    "兰州": (36.06, 103.83), "西宁": (36.62, 101.78), "银川": (38.49, 106.23), "珠海": (22.27, 113.58),
+    "东莞": (23.02, 113.75), "佛山": (23.02, 113.12), "香港": (22.32, 114.17), "澳门": (22.20, 113.55),
+    "台北": (25.03, 121.57),
 }
 # 风速（km/h）上限对应的风力等级
 BEAUFORT_KMH = (1, 6, 12, 20, 29, 39, 50, 62, 75, 89, 103, 118)
@@ -83,12 +99,15 @@ class Info:
 
     def fetch(self, url, params):
         request = urllib.request.Request(f"{url}?{urllib.parse.urlencode(params)}", headers={"User-Agent": "info_mcp"})
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return json.load(response)
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
-            log(f"请求失败 {url}: {error}")
-            raise ToolError("天气服务暂时连不上，查不到天气。") from error
+        for attempt in (1, 2):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    return json.load(response)
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+                log(f"请求失败（第 {attempt} 次）{url}: {error}")
+                if attempt == 2:
+                    raise ToolError("天气服务暂时连不上，查不到天气。") from error
+        raise AssertionError("unreachable")
 
     def locate(self, city):
         if not city or city == self.default_city:
@@ -96,6 +115,9 @@ class Info:
                 return self.default_location
             if not city:
                 raise ToolError("没有说要查哪个城市。")
+        city = city.removesuffix("市") if len(city) > 2 else city
+        if city in CITIES:
+            return (city, *CITIES[city])
         if city in self.places:
             return self.places[city]
         found = self.fetch(self.geocode_url, {"name": city, "count": 1, "language": "zh", "format": "json"})
@@ -192,7 +214,7 @@ def main():
     parser.add_argument("--default-city", default="", help="没说城市时查哪里，例如 深圳")
     parser.add_argument("--default-location", default="", help="默认城市的 纬度,经度，给了就不用查坐标")
     parser.add_argument("--timezone", default="Asia/Shanghai")
-    parser.add_argument("--timeout", type=float, default=8, help="每次请求的超时秒数 (默认: 8)")
+    parser.add_argument("--timeout", type=float, default=5, help="每次请求的超时秒数，失败重试一次 (默认: 5)")
     parser.add_argument("--weather-url", default=WEATHER_URL)
     parser.add_argument("--geocode-url", default=GEOCODE_URL)
     info = Info(parser.parse_args())

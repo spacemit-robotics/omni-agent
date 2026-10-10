@@ -3,8 +3,8 @@
 # Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
 # SPDX-License-Identifier: Apache-2.0
 #
-"""tools/info_mcp/info_mcp.py：MCP 握手、工具列表、时间、天气（默认城市不查坐标、别的城市查坐标、缓存、
-找不到城市、服务连不上、数据不对），全部对着本地的假 Open-Meteo，不联网。"""
+"""tools/info_mcp/info_mcp.py：MCP 握手、工具列表、时间、天气（默认城市和内置城市不查坐标、别的城市查坐标、
+失败重试一次、缓存、找不到城市、服务连不上、数据不对），全部对着本地的假 Open-Meteo，不联网。"""
 
 import json
 import re
@@ -26,13 +26,18 @@ FORECAST = {
 class FakeOpenMeteo(BaseHTTPRequestHandler):
     seen = []
     broken = False
+    drop_next = 0  # 接下来这么多个请求直接断开（模拟 4G 下握手卡住）
 
     def do_GET(self):
         url = urlsplit(self.path)
         query = {k: v[0] for k, v in parse_qs(url.query).items()}
         FakeOpenMeteo.seen.append((url.path, query))
+        if FakeOpenMeteo.drop_next:
+            FakeOpenMeteo.drop_next -= 1
+            self.close_connection = True
+            return
         if url.path == "/geocode":
-            body = {"results": [{"name": "北京", "latitude": 39.9, "longitude": 116.4}]} if query["name"] == "北京" else {}
+            body = {"results": [{"name": "汕尾", "latitude": 22.79, "longitude": 115.37}]} if query["name"] == "汕尾" else {}
         elif FakeOpenMeteo.broken:
             body = {"current": {}}
         else:
@@ -109,17 +114,25 @@ def main():
         check(client.call("get_weather", {"city": "深圳"})[0].startswith("深圳现在多云") and len(FakeOpenMeteo.seen) == 1,
               f"10 分钟内同一地点用缓存: {FakeOpenMeteo.seen}")
 
-        text, failed = client.call("get_weather", {"city": "北京"})
-        check(not failed and text.startswith("北京现在多云"), f"别的城市: {text}")
-        check([p for p, _ in FakeOpenMeteo.seen[1:]] == ["/geocode", "/forecast"], f"先查坐标再查天气: {FakeOpenMeteo.seen}")
-        check(FakeOpenMeteo.seen[2][1]["latitude"] == "39.9", "用查到的坐标")
+        text, failed = client.call("get_weather", {"city": "北京市"})
+        check(not failed and text.startswith("北京现在多云"), f"内置城市: {text}")
+        check([p for p, _ in FakeOpenMeteo.seen[1:]] == ["/forecast"] and FakeOpenMeteo.seen[1][1]["latitude"] == "39.9",
+              f"内置城市不查坐标: {FakeOpenMeteo.seen}")
+
+        FakeOpenMeteo.seen.clear()
+        FakeOpenMeteo.drop_next = 1
+        text, failed = client.call("get_weather", {"city": "汕尾"})
+        check(not failed and text.startswith("汕尾现在多云"), f"别的城市: {text}")
+        check([p for p, _ in FakeOpenMeteo.seen] == ["/geocode", "/geocode", "/forecast"],
+              f"第一次断开后重试，再按查到的坐标查天气: {FakeOpenMeteo.seen}")
+        check(FakeOpenMeteo.seen[2][1]["latitude"] == "22.79", "用查到的坐标")
 
         text, failed = client.call("get_weather", {"city": "不存在市"})
         check(failed and "没找到" in text, f"找不到城市: {text}")
 
         FakeOpenMeteo.broken = True
         FakeOpenMeteo.seen.clear()
-        text, failed = client.call("get_weather", {"city": "北京"})
+        text, failed = client.call("get_weather", {"city": "汕尾"})
         check(not failed and not FakeOpenMeteo.seen, f"缓存命中不发请求，服务坏了也不受影响: {text}")
 
         error = client.send("tools/call", {"name": "nope", "arguments": {}})
