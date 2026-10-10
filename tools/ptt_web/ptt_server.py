@@ -46,6 +46,7 @@ MAX_CONSOLE_FILE = 4 * 1024 * 1024
 TUNNEL_IDLE_S = 120           # 转发的连接两头都这么久没数据就断开（控制台的 WebSocket 一直有状态推送）
 MAX_UPLOAD = 2 * 1024 * 1024  # 16 kHz 单声道 16 位约 60 s
 KEEP_UPLOADS = 20
+RESTART_S = 15                # ptt_chat 退出后（比如开机时还没网，连不上大模型）隔这么久重启；控制台转发不受影响
 ACTION_TOOLS = ("perform_action", "stop_action")  # 让机器人动的工具；其余（查天气、时间）只在查询时提示一下
 KEEP_TURNS = 30               # 页面上能往回翻的轮数
 
@@ -73,16 +74,49 @@ class Robot:
         self.turns = {}             # id -> {owner, heard, live, reply, pending, lookups, tools, started, wall}
         self.resets = []            # 空闲清空记忆时最后一轮的编号，页面在它后面画分隔线
         self.last_activity = time.monotonic()
+        self.command = command
+        self.chat_log = chat_log
+        self.stopping = False
+        self.id_base = 0            # ptt_chat 重启后编号从 1 重来，加上这个对上本服务的编号
+        self._spawn()
+        threading.Thread(target=self._supervise, daemon=True).start()
+        if idle_reset_s > 0:
+            threading.Thread(target=self._idle_reset, daemon=True).start()
+
+    def _spawn(self):
         read_fd, write_fd = os.pipe()
-        output = open(chat_log, "a", encoding="utf-8") if chat_log else None  # 子进程一直用到退出
-        self.proc = subprocess.Popen(command + ["--event-fd", str(write_fd)], stdin=subprocess.PIPE,
+        output = open(self.chat_log, "a", encoding="utf-8") if self.chat_log else None  # 子进程一直用到退出
+        self.id_base = self.next_id
+        self.proc = subprocess.Popen(self.command + ["--event-fd", str(write_fd)], stdin=subprocess.PIPE,
                                      stdout=output, stderr=subprocess.STDOUT if output else None,
                                      pass_fds=(write_fd,), text=True, bufsize=1)
         os.close(write_fd)
+        if output:
+            output.close()
         self.events = os.fdopen(read_fd, "r", encoding="utf-8", errors="replace")
-        threading.Thread(target=self._read_events, daemon=True).start()
-        if idle_reset_s > 0:
-            threading.Thread(target=self._idle_reset, daemon=True).start()
+
+    def _supervise(self):
+        """ptt_chat 退出了就过一会儿重启：语音暂时不可用，但控制台（二维码进来的页面）照常转发。"""
+        while True:
+            self._read_events()
+            code = self.proc.wait()
+            with self.cond:
+                self.alive = False
+                self.ready = False
+                self.holder = None
+                self._changed()
+            if self.stopping:
+                log(f"ptt_chat 退出 (code {code})")
+                return
+            log(f"ptt_chat 退出 (code {code})，{RESTART_S} s 后重启；控制台照常可用")
+            time.sleep(RESTART_S)
+            if self.stopping:
+                return
+            with self.cond:
+                self._spawn()
+                self.alive = True
+                self.state = "idle"
+                self._changed()
 
     def _changed(self):
         self.seq += 1
@@ -101,6 +135,8 @@ class Robot:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(event.get("id"), int):
+                event["id"] += self.id_base
             with self.cond:
                 kind = event.get("type")
                 turn = self.turns.get(event.get("id"))
@@ -142,16 +178,10 @@ class Robot:
                     turn["error"] = event.get("message", "")
                 self.last_activity = time.monotonic()
                 self._changed()
-        code = self.proc.wait()
-        log(f"ptt_chat 退出 (code {code})")
-        with self.cond:
-            self.alive = False
-            self.ready = False
-            self._changed()
 
     def _idle_reset(self):
         reset_done = True
-        while self.alive:
+        while not self.stopping:
             time.sleep(min(5, self.idle_reset_s))
             with self.cond:
                 idle = self.state == "idle" and self.holder is None
@@ -260,6 +290,7 @@ class Robot:
         return {"actions": list(self.actions.values())}
 
     def stop(self):
+        self.stopping = True
         if self.proc.poll() is None:  # 已经退出时再写 quit 只会在退出清理时多打一条 BrokenPipeError
             self._send("quit")
         try:
@@ -605,11 +636,6 @@ def main():
         # 握手推迟到各连接自己的处理线程里第一次读时做，慢客户端不会卡住 accept
         server.socket = tls.wrap_socket(server.socket, server_side=True, do_handshake_on_connect=False)
 
-    def watch():
-        robot.proc.wait()
-        server.shutdown()
-
-    threading.Thread(target=watch, daemon=True).start()
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
     target = f"控制台 {args.console}" if console else "不转发控制台"
     log(f"监听 {'https' if tls else 'http'}://{args.listen}，语音面板 {VOICE}panel.js，{target}")
@@ -623,7 +649,7 @@ def main():
         if redirect is not None:
             redirect.shutdown()
             redirect.server_close()
-    sys.exit(0 if robot.proc.returncode in (0, None) else 1)
+    sys.exit(0)
 
 
 if __name__ == "__main__":
