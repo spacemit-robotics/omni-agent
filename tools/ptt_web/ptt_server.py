@@ -5,15 +5,17 @@
 #
 """机器人控制台的语音对话：给控制台网页提供 HTTPS 和按住说话的语音面板，录音交给 ptt_chat 识别、回答并用本机扬声器播放。
 
-    ptt_server.py --operator-connection FILE [--console 127.0.0.1:8765 [--console-overlay DIR]] [--listen 127.0.0.1:18080]
+    ptt_server.py --operator-connection FILE [--console HOST:PORT [--console-overlay DIR]]
+                  [--listen 127.0.0.1:18080]
                   [--tls-cert C --tls-key K] [--redirect-listen [::]:8442 --redirect-to URL]
                   [--actions k=名,...] -- ptt_chat ...
 
 手机浏览器只在 HTTPS 页面里允许录音，而机器人控制台（humanoid_common operator_service）是纯 HTTP，所以由本服务
 给它套一层 HTTPS：/voice/ 以外的请求原样转发给 --console（含 WebSocket），控制台网页再从 /voice/panel.js 加载语音面板，
 在同一页里切换「控制 | 语音」。机器人上部署的控制台还没有这个切换时，--console-overlay 用改好的网页文件代替原文件返回，
-机器人上的文件不用动；只在原文件和改动所基于的版本一致时代替，否则原样转发（控制台照常能用，只是没有语音）。语音接口 /voice/api/* 要带控制台的配对令牌（X-Operator-Token，和 --operator-connection
-连接文件里的一致），没配对的人用不了。
+机器人上的文件不用动；只在原文件和改动所基于的版本一致时代替，否则原样转发。
+语音接口 /voice/api/* 要带公开配对令牌（X-Operator-Token），从 --operator-connection 的 public_token 读取，
+兼容旧文件的 token 字段；不能使用私有控制令牌。
 
 一次只让一个人说；机器人回答某个人时，别人要等它说完。面板显示最近的对话（所有人的），回答边生成边显示；
 动作清单来自 --actions（和 humanoid_operator_mcp 同一格式）。
@@ -38,7 +40,8 @@ from urllib.parse import parse_qs, urlsplit
 
 HERE = Path(__file__).resolve().parent
 VOICE = "/voice/"
-STATIC = {"panel.js": ("panel.js", "text/javascript; charset=utf-8"), "panel.css": ("panel.css", "text/css; charset=utf-8")}
+STATIC = {"panel.js": ("panel.js", "text/javascript; charset=utf-8"),
+          "panel.css": ("panel.css", "text/css; charset=utf-8")}
 # 控制台只给本机用的入口：对端是本机且 Host 是 localhost 时直接发配对令牌（server.cpp）。经本服务转发时对端就是本机，
 # Host 又由请求方决定，转发出去等于把令牌发给局域网里任何人，所以一律不转发。
 BLOCKED = ("/api/v1/local-session", "/pairing.svg")
@@ -59,7 +62,8 @@ class Robot:
 
     def __init__(self, command, upload_dir, max_hold_s, idle_reset_s, chat_log, actions=None, restart_s=15):
         self.actions = actions or {}  # 动作键 -> 显示名
-        self.restart_s = restart_s    # ptt_chat 退出后（比如开机时还没网，连不上大模型）隔这么久重启；控制台转发不受影响
+        # ptt_chat 退出后隔这么久重启；控制台转发不受影响。
+        self.restart_s = restart_s
         self.upload_dir = upload_dir
         self.max_hold_s = max_hold_s
         self.idle_reset_s = idle_reset_s
@@ -316,7 +320,8 @@ class OperatorToken:
             try:
                 mtime = self.path.stat().st_mtime_ns
                 if mtime != self.mtime:
-                    self.token = str(json.loads(self.path.read_text()).get("token", ""))
+                    connection = json.loads(self.path.read_text())
+                    self.token = str(connection.get("public_token", connection.get("token", "")))
                     self.mtime = mtime
             except (OSError, ValueError, AttributeError):
                 self.token, self.mtime = "", None
@@ -586,7 +591,8 @@ def main():
     parser.add_argument("--console", default=None,
                         help="机器人控制台 HOST:PORT，/voice/ 以外的请求转发过去，例如 127.0.0.1:8765 (默认: 不转发)")
     parser.add_argument("--console-overlay", default=None,
-                        help="控制台网页替换目录（make_console_overlay.py 生成）：原文件和 base.sha256 一致时代替原文件返回")
+                        help="控制台网页替换目录（make_console_overlay.py 生成）："
+                             "原文件和 base.sha256 一致时才替换")
     parser.add_argument("--upload-dir", default=None,
                         help=f"录音存放目录，只留最近 {KEEP_UPLOADS} 段 (默认: $XDG_RUNTIME_DIR/ptt_web)")
     parser.add_argument("--max-hold", type=int, default=15, help="最长按住秒数 (默认: 15)")
@@ -597,7 +603,7 @@ def main():
     parser.add_argument("--tls-cert", default=None, help="HTTPS 证书链 (PEM)，和 --tls-key 一起给")
     parser.add_argument("--tls-key", default=None, help="HTTPS 私钥 (PEM)")
     parser.add_argument("--redirect-listen", default=None,
-                        help="另开一个纯 HTTP 端口，所有 GET 都 302 到 --redirect-to（保留查询参数），给 HTTP 控制台当跳板")
+                        help="另开一个 HTTP 端口，GET 跳转到 --redirect-to（保留查询参数），作为控制台跳板")
     parser.add_argument("--redirect-to", default=None, help="跳转目标，本服务的 https 地址，如 https://<域名>:8443/")
     parser.add_argument("--actions", default="",
                         help="语音面板上列出的动作，key=显示名,...，和 humanoid_operator_mcp --actions 同一格式")

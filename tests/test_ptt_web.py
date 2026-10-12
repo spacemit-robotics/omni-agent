@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """ptt_server.py 端到端测试：假的机器人控制台 + 假的 ptt_chat，检查转发和语音面板拿到的对话状态。
 
-转发：控制台页面原样转发（Host 不改）、替换网页文件只在原文件和基线一致时生效（他们升级后原样转发）、只给本机的配对入口不转发（伪造 Host 也不行）、WebSocket 双向转发
-（明文和 TLS 各一遍，TLS 下用跨多个记录的大消息）、控制台挂了回 502。
+转发：控制台页面原样转发（Host 不改）、替换网页文件只在原文件和基线一致时生效（他们升级后原样转发）、
+只给本机的配对入口不转发（伪造 Host 也不行）、WebSocket 双向转发（明文和 TLS 各一遍，TLS 下用跨多个记录的大消息）、
+控制台挂了回 502。
 语音：面板文件、接口要带配对令牌（重新配对后旧令牌失效）、按住互斥、回答别人时不让按、边生成边显示、
 准备做动作 → 已做、被打断时留下已显示的文字、空闲清空记忆的分隔标记、纯 HTTP 跳转带上查询参数、退出时让 ptt_chat 退出。
 ptt_chat 起不来或中途退出（比如没网）：控制台照常转发，语音显示不可用，隔一会儿重启；重启后对话编号接着排。
@@ -187,7 +188,8 @@ def main():
     overlay.mkdir()
     (overlay / "index.html").write_bytes(b"<!doctype html><title>voice console</title>")
     (overlay / "app.js").write_bytes(b"// voice")
-    (overlay / "base.sha256").write_text(f"{hashlib.sha256(console.index).hexdigest()}  index.html\n{'0' * 64}  app.js\n")
+    (overlay / "base.sha256").write_text(
+        f"{hashlib.sha256(console.index).hexdigest()}  index.html\n{'0' * 64}  app.js\n")
     connection = work / "connection.json"
     connection.write_text(json.dumps({"v": 1, "endpoint": f"ws://127.0.0.1:{console_port}", "token": "optoken-one"}))
     port, redirect_port = free_port(), free_port()
@@ -352,7 +354,8 @@ def main():
         (work / "gate-b").touch()
         s = wait(a, lambda s: s["history"][-1]["tools"], "动作结果")
         turn = s["history"][-1]
-        check(turn["tools"] == ["已开始做「挥手」。"] and not turn["pending"] and turn["reply"] is None, f"动作结果: {turn}")
+        check(turn["tools"] == ["已开始做「挥手」。"] and not turn["pending"] and turn["reply"] is None,
+              f"动作结果: {turn}")
         (work / "gate-c").touch()
         s = wait(a, lambda s: s["state"] == "idle", "第一轮结束")
         turn = s["history"][-1]
@@ -382,14 +385,21 @@ def main():
 
         # 重新配对换了令牌：旧令牌失效，新令牌可用
         time.sleep(0.01)
-        connection.write_text(json.dumps({"v": 1, "endpoint": f"ws://127.0.0.1:{console_port}", "token": "optoken-two"}))
+        connection.write_text(json.dumps({
+            "v": 1, "endpoint": f"ws://127.0.0.1:{console_port}", "token": "optoken-two"}))
         code, _, _ = request(f"{base}/voice/api/info?client={a}", headers=token)
         check(code == 401, f"旧令牌应失效: {code}")
         check(api("info", a, headers={"X-Operator-Token": "optoken-two"})["actions"], "新令牌可用")
 
+        connection.write_text(json.dumps({"v": 1, "token": "private-control", "public_token": "optoken-two"}))
+        check(api("info", a, headers={"X-Operator-Token": "optoken-two"})["actions"], "公开语音令牌仍可用")
+        code, _, _ = request(f"{base}/voice/api/info?client={a}", headers={"X-Operator-Token": "private-control"})
+        check(code == 401, "语音接口不接受本机控制令牌")
+
         # 纯 HTTP 入口跳到 HTTPS 页面，带上查询参数（#token= 片段由浏览器自己保留）
         code, headers, _ = request(f"http://127.0.0.1:{redirect_port}/?mode=voice")
-        check(code == 302 and headers["Location"] == "https://robot.example:8443/?mode=voice", f"跳转: {headers.get('Location')}")
+        check(code == 302 and headers["Location"] == "https://robot.example:8443/?mode=voice",
+              f"跳转: {headers.get('Location')}")
 
         # 控制台挂了：502，不挂住
         console.shutdown()
@@ -471,13 +481,16 @@ def restart_checks():
         # 网络好了：下一次重启就起来；一轮之后它退出、再重启，第二轮的编号接着排，不覆盖第一轮
         (work / "fail").unlink()
         wait(lambda s: s["ready"], "恢复后 ptt_chat 就绪")
+        starts_before_talk = len((work / "starts").read_text())
         check(talk() == 1, "第一轮编号 1")
         s = wait(lambda s: s["history"] and s["history"][-1]["reply"], "第一轮回答")
         check([t["reply"] for t in s["history"]] == ["第1次回答"], f"第一轮: {s['history']}")
-        wait(lambda s: s["ready"] and not s["holder"], "退出后重启就绪")
+        wait(lambda s: len((work / "starts").read_text()) > starts_before_talk
+             and s["ready"] and not s["holder"], "退出后重启就绪")
         check(talk() == 2, "重启后编号接着排")
         s = wait(lambda s: len(s["history"]) == 2 and s["history"][-1]["reply"], "第二轮回答")
-        check([(t["id"], t["heard"], t["reply"]) for t in s["history"]] == [(1, "第1句", "第1次回答"), (2, "第2句", "第2次回答")],
+        expected = [(1, "第1句", "第1次回答"), (2, "第2句", "第2次回答")]
+        check([(t["id"], t["heard"], t["reply"]) for t in s["history"]] == expected,
               f"重启前后的对话: {s['history']}")
     except Exception as e:  # noqa: BLE001
         print(f"FAIL: {type(e).__name__}: {e}\n--- {work}/server.log ---\n{(work / 'server.log').read_text()}",
