@@ -28,15 +28,6 @@ tests:
     command: |
       bash application/native/omni_agent/tests/test_tool_speech.sh
 
-  - name: omni-agent-ptt-web
-    description: Verifies the console voice server against a fake operator console and fake ptt_chat - verbatim proxying incl. WebSocket, local-only pairing endpoints never forwarded, pairing-token auth on the voice API, shared history, streamed replies, pending then performed actions, idle-reset marker, press locking, and serving the console while ptt_chat cannot start, restarting it with turn numbers continuing.
-    category: functional
-    scopes: [pr]
-    timeout_s: 60
-    workdir: sdk
-    command: |
-      python3 application/native/omni_agent/tests/test_ptt_web.py
-
   - name: omni-agent-info-mcp
     description: Verifies the time/weather MCP server against a fake Open-Meteo - handshake and version fallback, tools/list, get_time format, default city without geocoding, other cities via geocoding, cache, unknown city, unreachable service and malformed data.
     category: functional

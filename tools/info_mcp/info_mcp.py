@@ -13,7 +13,8 @@
                 默认城市用 --default-location，国内主要城市用内置坐标，其余经 Open-Meteo 地理编码查坐标。
                 机器人走 4G 访问境外服务器时偶尔握手卡住，每个请求失败后重试一次；同一地点 10 分钟内复用结果。
 
-mcp.json 里这样接：{"name": "Info", "type": "stdio", "command": "python3", "args": ["<本文件>", "--default-city", "深圳", ...]}
+mcp.json 里这样接：
+{"name": "Info", "type": "stdio", "command": "python3", "args": ["<本文件>", "--default-city", "深圳", ...]}
 """
 
 import argparse
@@ -82,11 +83,12 @@ class Info:
         self.weather = {}  # (纬度, 经度) -> (时间, 结果)
 
     def tools(self):
-        city = f"不给就查{self.default_city}（展台所在地）" if self.default_city else "必填"
+        city = f"不给就查默认城市{self.default_city}" if self.default_city else "必填"
         return [
             {"name": "get_time", "description": "查现在的日期、星期几和时间。用户问今天几号、星期几、现在几点时调用。",
              "inputSchema": {"type": "object", "properties": {}}},
-            {"name": "get_weather", "description": "查一个城市现在的天气和今天的气温范围。用户问天气、冷不冷、要不要带伞时调用。",
+            {"name": "get_weather",
+             "description": "查一个城市现在的天气和今天的气温范围。用户问天气、冷不冷、要不要带伞时调用。",
              "inputSchema": {"type": "object", "properties": {
                  "city": {"type": "string", "description": f"城市名，例如 北京、上海；{city}"}}}},
         ]

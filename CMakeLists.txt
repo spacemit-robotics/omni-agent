@@ -577,3 +577,4 @@ endif()
 message(STATUS "Building voice_chat_daemon (lightweight launcher)")
 
 install(TARGETS voice_chat_daemon RUNTIME DESTINATION bin)
+install(FILES tools/info_mcp/info_mcp.py DESTINATION share/omni_agent)
