@@ -19,6 +19,7 @@
  * 事件写到 --event-fd（每行一个 JSON），没给时写 stdout 并加 "@event " 前缀：
  *   {"type":"ready"}
  *   {"type":"state","id":N,"state":"recognizing|thinking|idle"}
+ *       被新录音顶掉、或被 interrupt 丢掉的待处理任务不会开始处理，只发一条 idle
  *   {"type":"asr","id":N,"text":"...","ms":268}        text 为空表示没听清
  *   {"type":"delta","id":N,"text":"..."}               LLM 新输出的一段文字（念之前就发）
  *   {"type":"tool","id":N,"name":"perform_action","args":{...}}   模型决定调用工具（先播报，播完才真正调用）
@@ -297,18 +298,23 @@ struct Job {
 };
 
 // 命令队列：最多留一条待处理的录音，新的顶掉旧的；interrupt 清空并使正在处理的作废。
+// Push / Interrupt 返回被丢掉、不会再处理的那条待处理任务。
 class JobQueue {
 public:
-    void Push(Job::Kind kind, const std::string& payload) {
+    std::optional<Job> Push(Job::Kind kind, const std::string& payload) {
         std::lock_guard<std::mutex> lock(mutex_);
+        std::optional<Job> dropped = std::move(pending_);
         pending_ = Job{kind, payload, ++next_id_, generation_.load()};
         cv_.notify_all();
+        return dropped;
     }
 
-    void Interrupt() {
+    std::optional<Job> Interrupt() {
         std::lock_guard<std::mutex> lock(mutex_);
+        std::optional<Job> dropped = std::move(pending_);
         pending_.reset();
         ++generation_;
+        return dropped;
     }
 
     void RequestReset() {
@@ -582,20 +588,24 @@ int main(int argc, char* argv[]) {
 
     std::atomic<bool> reader_done{false};
     std::thread reader([&]() {
+        // 没开始处理就被丢掉的任务也要收尾，不然前端一直等这个编号的结果
+        auto finishDropped = [](const std::optional<Job>& dropped) {
+            if (dropped) emitEvent({{"type", "state"}, {"id", dropped->id}, {"state", "idle"}});
+        };
         std::string line;
         while (g_running && std::getline(std::cin, line)) {
             if (line == "quit") break;
             if (line == "interrupt") {
-                jobs.Interrupt();
+                finishDropped(jobs.Interrupt());
                 g_barge_in = true;  // 和真实插话一样：置打断标志并清空播放
                 ctx.clear_playback();
                 std::cout << getTimestamp() << " [PTT] 打断" << std::endl;
             } else if (line == "reset") {
                 jobs.RequestReset();
             } else if (line.rfind("wav ", 0) == 0) {
-                jobs.Push(Job::Kind::WAV, line.substr(4));
+                finishDropped(jobs.Push(Job::Kind::WAV, line.substr(4)));
             } else if (line.rfind("text ", 0) == 0) {
-                jobs.Push(Job::Kind::TEXT, line.substr(5));
+                finishDropped(jobs.Push(Job::Kind::TEXT, line.substr(5)));
             } else if (!line.empty()) {
                 std::cerr << getTimestamp() << " [PTT] 未知命令: " << line << std::endl;
             }
