@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "text_buffer.hpp"
+#include "tool_speech.hpp"
 #include "voice_common.hpp"
 
 #ifdef USE_MCP
@@ -230,6 +231,16 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
         }
     };
 
+    // 网络断了时用户什么都听不到，会以为没被听见；还没开口就先说一句兜底，播完再返回
+    auto handleLlmError = [&](const std::string& error, bool said_something) {
+        if (ctx.on_llm_error) ctx.on_llm_error(error);
+        if (said_something || ctx.llm_error_speech.empty() || g_barge_in || !g_running) return;
+        synthesizeSentence(ctx.llm_error_speech);
+        while (ctx.is_playing() && g_running && !g_barge_in) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    };
+
 #ifdef USE_MCP
     if (ctx.mcp_enabled) {
         {
@@ -240,8 +251,19 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
 
         const int MAX_TOOL_ROUNDS = 10;
         int round = 0;
+        bool tools_ran = false;
+
+        // 这一轮没说完就被打断或出错时，把已经说出口的部分记进对话。否则对话里留下一条没有回复的用户
+        // 消息，下一句（比如“停下”）会被模型当成和它连在一起的请求，去执行已经取消的动作。
+        auto recordUnfinishedRound = [&](const std::string& reason) {
+            std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
+            ctx.conversation_messages->push_back(spacemit_llm::ChatMessage::Assistant(
+                full_response + "（" + reason + (tools_ran ? "" : "，没有执行") + "）"));
+            trimConversationHistory(ctx.conversation_messages);
+        };
 
         while (round++ < MAX_TOOL_ROUNDS && g_running && !g_barge_in) {
+            const int round_first_sentence = sentence_count;
             std::cout << getTimestamp() << " [LLM] 第 " << round << " 轮...\n";
             std::cout << getTimestamp() << " [AI]: " << std::flush;
 
@@ -269,6 +291,7 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
                     if (!chunk.empty()) {
                         std::cout << chunk << std::flush;
                         full_response += chunk;
+                        if (ctx.on_llm_text) ctx.on_llm_text(chunk);
                         text_buffer.addText(chunk);
 
                         while (text_buffer.hasSentence() && !g_barge_in) {
@@ -284,9 +307,12 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
 
             if (result.cancelled && g_barge_in) {
                 std::cout << getTimestamp() << " [LLM] 已因 barge-in 中断生成\n";
+                recordUnfinishedRound("被用户打断");
                 break;
             }
             if (!result.error.empty()) {
+                recordUnfinishedRound("出错中断");
+                handleLlmError(result.error, sentence_count > 0 || tools_ran);
                 g_processing = false;
                 return;
             }
@@ -320,13 +346,40 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
                                 result.reasoning_content));
                     }
 
+                    if (ctx.on_tool_call) {
+                        for (const auto& call : pending_calls) ctx.on_tool_call(call.name, call.args.dump());
+                    }
+
+                    bool spoke_before_tools = false;
+                    bool interrupted = false;
                     for (const auto& call : pending_calls) {
+                        auto speech = ctx.pre_tool_speech.find(call.name);
+                        if (!interrupted && !spoke_before_tools && speech != ctx.pre_tool_speech.end()) {
+                            std::cout << getTimestamp() << " [MCP] 先播报再调用: " << call.name << std::endl;
+                            ToolSpeechHooks hooks;
+                            hooks.speak = synthesizeSentence;
+                            hooks.is_playing = ctx.is_playing;
+                            hooks.interrupted = []() { return g_barge_in || !g_running; };
+                            interrupted = !speakBeforeTool(&text_buffer,
+                                sentence_count > round_first_sentence, speech->second, hooks);
+                            spoke_before_tools = true;
+                        }
+                        // 每个 tool_call 都要有对应的 tool 消息，否则下一轮请求不合法。
+                        if (interrupted) {
+                            std::cout << getTimestamp() << " [MCP] 播报被打断，不调用: " << call.name << std::endl;
+                            std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
+                            ctx.conversation_messages->push_back(
+                                spacemit_llm::ChatMessage::Tool("用户打断了，没有执行。", call.id));
+                            continue;
+                        }
+
                         std::string server = ctx.mcp_manager->findServerForTool(call.name);
                         std::cout << getTimestamp() << " [MCP] 调用: " << call.name
                             << " @ " << server << " 参数: "
                             << call.args.dump() << std::endl;
 
                         auto tool_result = ctx.mcp_manager->callTool(call.name, call.args);
+                        tools_ran = true;
 
                         std::string result_text;
                         if (tool_result.success && !tool_result.contents.empty()) {
@@ -338,6 +391,7 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
                         }
 
                         std::cout << getTimestamp() << " [MCP] 结果: " << result_text << std::endl;
+                        if (ctx.on_tool_result) ctx.on_tool_result(call.name, result_text);
 
                         {
                             std::lock_guard<std::mutex> lock(*ctx.conversation_mutex);
@@ -396,6 +450,7 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
                 if (!chunk.empty()) {
                     std::cout << chunk << std::flush;
                     full_response += chunk;
+                    if (ctx.on_llm_text) ctx.on_llm_text(chunk);
                     text_buffer.addText(chunk);
 
                     while (text_buffer.hasSentence() && !g_barge_in) {
@@ -410,6 +465,7 @@ void processText(VoicePipelineContext& ctx, const std::string& text) {
             std::cout << "\n" << getTimestamp() << " [LLM] 已因 barge-in 中断生成\n";
         } else if (!result.error.empty()) {
             std::cerr << "\n" << getTimestamp() << " [LLM错误] " << result.error << std::endl;
+            handleLlmError(result.error, sentence_count > 0);
             g_processing = false;
             return;
         }

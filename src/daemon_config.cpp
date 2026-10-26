@@ -144,6 +144,7 @@ const char* kLlmConfigTemplate = R"({
     "threads":           4,
     "reasoning_budget":  0,
     "extra_args":        [],
+    "extra_body":        {},
     "max_tokens":        150,
     "system_prompt":     "You are a helpful assistant."
 }
@@ -166,6 +167,7 @@ const char* kMcpConfigTemplate = R"({
     "timeout":  120,
     "registry_url":           null,
     "registry_poll_interval": 5,
+    "pre_tool_speech": {},
     "servers": [
         {
             "name": "Calculator",
@@ -472,6 +474,13 @@ void ParseLlm(const json& j, DaemonConfig& cfg) {
     GetOpt(j, "extra_args", llm.extra_args);
     GetOpt(j, "max_tokens", llm.max_tokens);
     GetOpt(j, "system_prompt", llm.system_prompt);
+    auto extra_body = j.find("extra_body");
+    if (extra_body != j.end() && !extra_body->is_null()) {
+        if (!extra_body->is_object()) {
+            throw std::runtime_error("llm.extra_body must be an object");
+        }
+        llm.extra_body = *extra_body;
+    }
     cfg.llm = llm;
 }
 
@@ -503,6 +512,18 @@ void ParseMcp(const json& j, DaemonConfig& cfg) {
     GetOpt(j, "timeout", mcp.timeout);
     GetOpt(j, "registry_url", mcp.registry_url);
     GetOpt(j, "registry_poll_interval", mcp.registry_poll_interval);
+    auto speech = j.find("pre_tool_speech");
+    if (speech != j.end() && !speech->is_null()) {
+        if (!speech->is_object()) {
+            throw std::runtime_error("mcp.pre_tool_speech must be an object");
+        }
+        for (const auto& item : speech->items()) {
+            if (!item.value().is_string()) {
+                throw std::runtime_error("mcp.pre_tool_speech." + item.key() + " must be a string");
+            }
+        }
+        mcp.pre_tool_speech = *speech;
+    }
     auto servers = j.find("servers");
     if (servers != j.end() && !servers->is_null()) {
         if (!servers->is_array()) {
@@ -725,6 +746,7 @@ json LlmJson(const LlmCfg& llm) {
         {"threads", llm.threads},
         {"reasoning_budget", llm.reasoning_budget},
         {"extra_args", llm.extra_args},
+        {"extra_body", llm.extra_body},
         {"max_tokens", llm.max_tokens},
         {"system_prompt", llm.system_prompt},
     };
@@ -749,6 +771,7 @@ json McpJson(const McpCfg& mcp) {
     j["timeout"] = mcp.timeout;
     j["registry_url"] = mcp.registry_url.empty() ? json(nullptr) : json(mcp.registry_url);
     j["registry_poll_interval"] = mcp.registry_poll_interval;
+    j["pre_tool_speech"] = mcp.pre_tool_speech;
     j["servers"] = mcp.servers;
     return j;
 }

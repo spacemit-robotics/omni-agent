@@ -138,6 +138,27 @@ python3 -m venv ~/.mcp-env
 }
 ```
 
+让会动设备的工具“先说再动”（`pre_tool_speech`，工具名 → 兜底播报）：
+
+```json
+{
+    "enabled": true,
+    "pre_tool_speech": {
+        "perform_action": "好的，请注意安全。"
+    },
+    "servers": [
+        {
+            "name": "Robot",
+            "type": "stdio",
+            "command": "humanoid_operator_mcp",
+            "args": ["--robot", "<robot-name>"]
+        }
+    ]
+}
+```
+
+列出的工具调用前，先把模型这一轮的话播完；模型只给了工具调用、没有说话时，播这里配置的兜底句（配空字符串则不播）。播放结束后才调用工具；播放期间被唤醒词或 barge-in 打断时不调用，并在对话里记为“用户打断了，没有执行”。没列出的工具照旧立即调用，停止类工具（如 `stop_action`）不要列进来。
+
 使用云端 OpenAI-compatible LLM：
 
 ```bash
@@ -153,9 +174,12 @@ DeepSeek 示例：
 {
     "api_base": "https://api.deepseek.com",
     "api_key": "sk-...",
-    "model_name": "deepseek-v4-flash"
+    "model_name": "deepseek-v4-flash",
+    "extra_body": {"thinking": {"type": "disabled"}}
 }
 ```
+
+`extra_body` 会原样合并进每个 LLM 请求体，用于服务商专有参数（daemon 通过 `--llm-extra-body` 传给 `voice_chat`）。DeepSeek V4 默认开启推理，推理 token 计入 `max_tokens`：默认 150 时上下文稍复杂就会被推理用完，回复为空。语音场景建议像上面这样关闭推理；保留推理时把 `max_tokens` 调到 1024 以上。
 
 注册并启用声纹验证：
 
@@ -383,6 +407,51 @@ voice_chat_aec --llm-url http://127.0.0.1:9191/v1 --sample-rate 48000
 | `AEC3_CFG` | 空 | 覆盖 WebRTC AEC3 参数，`key=value` 逗号分隔（`filter_len`、`init_len`、`default_delay` 等，见 `src/aec_duplex_processor.cpp`） |
 | `AEC_DUMP_DIR` | 空 | 未配置 `debug.aec_dump_dir` 时的测试录音目录 |
 | `AEC_DIAG` | 未设置 | 设置后每 2 s 打印一次队列深度、丢帧、每帧耗时和参考延迟 |
+
+### text_chat
+
+文字输入调试：和 `voice_chat` 走同一个对话流程（LLM → 分句 TTS → MCP 工具），用 stdin 代替麦克风和 ASR，用按音频时长计时的假播放器代替声卡，每轮合成的语音存成 wav。不占用音频设备，适合调 prompt、MCP 工具和“先说再动”的时序。
+
+```bash
+export OPENAI_API_KEY=...
+text_chat --llm-url https://api.deepseek.com/v1 --model deepseek-flash \
+    --mcp-config mcp.json --out-dir /tmp/text_chat
+> 跟大家打个招呼
+> /barge 1500 介绍一下你自己    # 开始处理 1.5 s 后模拟用户打断
+> /quit
+```
+
+`--mcp-config` 读的是 `voice_chat` 的 MCP 配置格式（daemon 生成的 `mcp_resolved.json` 就是这种），其中不支持 `null` 值。`--max-tokens` 默认 150，与 daemon 默认一致。
+
+### ptt_chat
+
+`ptt_chat` 不开麦克风，录音由外部提供：stdin 收 `wav <path>`，ASR 识别后走同一个对话流程，用本机扬声器播放。适合展会等嘈杂场合，用手机按住说话代替麦克风阵列和 AEC。
+
+| stdin 命令 | 作用 |
+|------------|------|
+| `wav <path>` | 识别并回答这段录音（16 位 PCM wav，任意采样率和声道数，内部转成 16 kHz 单声道） |
+| `text <文字>` | 跳过识别直接回答 |
+| `interrupt` | 停止播放，取消正在进行的回答（还没开始的动作不再执行），丢掉还没处理的录音 |
+| `reset` | 清空对话记忆，当前回答结束后生效 |
+| `quit` | 退出 |
+
+事件（状态、识别结果、边生成边发的回答文字、准备调用 / 已调用的工具、最终回答）写到 `--event-fd`，每行一个 JSON，格式见 `examples/ptt_chat.cpp` 开头。`-o none` 用假播放器，不出声。
+
+`ptt_chat` 只处理输入音频、对话、语音合成和 MCP 工具调用，不负责机器人网页或型号配置。
+网页语音面板及 HTTPS 适配见 `humanoid_common/clients/web/voice/`，
+操作工具见 `humanoid_common/clients/mcp/`；具体机器人的人设、动作清单和服务由机型包配置。
+这些是可选客户端，不是 omni_agent 的构建依赖。
+
+### 时间和天气（tools/info_mcp）
+
+`tools/info_mcp/info_mcp.py` 是一个 stdio MCP 服务（只依赖 Python 标准库），给模型两个工具：`get_time`（本机时钟的日期、星期、时间）和 `get_weather`（城市现在的天气和今天的气温范围，数据来自免费、不要密钥的 Open-Meteo；不给城市查 `--default-city`；默认城市用 `--default-location`、国内主要城市用内置坐标，其余经 Open-Meteo 地理编码查坐标；每个请求失败重试一次，同一地点 10 分钟内复用）。接进 `mcp.json`：
+
+```json
+{"name": "Info", "type": "stdio", "command": "python3",
+ "args": ["<PREFIX>/share/omni_agent/info_mcp.py", "--default-city", "深圳", "--default-location", "22.5431,114.0579"]}
+```
+
+测试：`python3 tests/test_info_mcp.py`（假的 Open-Meteo，不联网）。
 
 ### 声纹工具
 

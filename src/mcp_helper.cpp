@@ -11,6 +11,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,14 @@ bool loadMCPConfig(const std::string& path, MCPConfig& config) {
         if (j.contains("system_prompt")) config.system_prompt = j["system_prompt"];
         if (j.contains("registry_url")) config.registry_url = j["registry_url"];
         if (j.contains("registry_poll_interval")) config.registry_poll_interval = j["registry_poll_interval"];
+        if (j.contains("pre_tool_speech") && !j["pre_tool_speech"].is_null()) {
+            if (!j["pre_tool_speech"].is_object()) {
+                throw std::runtime_error("pre_tool_speech 应为 {\"工具名\": \"播报\"}");
+            }
+            for (const auto& item : j["pre_tool_speech"].items()) {
+                config.pre_tool_speech[item.key()] = item.value().get<std::string>();
+            }
+        }
 
         if (j.contains("servers")) {
             for (const auto& srv : j["servers"]) {

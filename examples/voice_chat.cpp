@@ -84,6 +84,7 @@ struct Config {
     int wake_command_timeout_ms = 5000;
     int max_tokens = 150;
     int reasoning_budget = -1;
+    std::string llm_extra_body;  // 合并进每个 LLM 请求体的 JSON 对象
     std::string system_prompt = "You are a helpful assistant.";
     std::string startup_greeting;
     bool list_devices = false;
@@ -291,6 +292,8 @@ Config parseArgs(int argc, char* argv[]) {
             cfg.max_tokens = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--reasoning-budget") == 0 && i + 1 < argc) {
             cfg.reasoning_budget = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--llm-extra-body") == 0 && i + 1 < argc) {
+            cfg.llm_extra_body = argv[++i];
         } else if (strcmp(argv[i], "--system-prompt") == 0 && i + 1 < argc) {
             cfg.system_prompt = argv[++i];
         } else if (strcmp(argv[i], "--startup-greeting") == 0 && i + 1 < argc) {
@@ -352,6 +355,7 @@ Config parseArgs(int argc, char* argv[]) {
                 << "  --llm-url <url>               LLM API地址 (必填)\n"
                 << "  --max-tokens <n>              最大生成 token 数 (默认: 150)\n"
                 << "  --reasoning-budget <n>        reasoning budget；0 表示隐藏思考输出\n"
+                << "  --llm-extra-body <json>       合并进每个 LLM 请求体的 JSON 对象（如关闭推理）\n"
                 << "  --system-prompt <text>        系统提示词\n"
                 << "\nVAD:\n"
                 << "  --vad-threshold <0-1>         VAD触发阈值 (默认: 0.8)\n"
@@ -630,6 +634,14 @@ int main(int argc, char* argv[]) {
     auto llm = llm_result.llm;
     if (cfg.reasoning_budget >= 0) {
         llm->update_reasoning_budget(cfg.reasoning_budget);
+    }
+    if (!cfg.llm_extra_body.empty()) {
+        try {
+            llm->update_extra_body(cfg.llm_extra_body);
+        } catch (const std::exception& e) {
+            std::cerr << getTimestamp() << " 错误: --llm-extra-body 不是 JSON 对象: " << e.what() << "\n";
+            return 1;
+        }
     }
     auto system_prompt = llm_result.system_prompt;
 
@@ -1049,6 +1061,7 @@ int main(int argc, char* argv[]) {
     pipeline_ctx.conversation_messages = &mcp.conversation_messages;
     pipeline_ctx.conversation_mutex = &mcp.conversation_mutex;
     pipeline_ctx.mcp_enabled = mcp.enabled;
+    pipeline_ctx.pre_tool_speech = mcp.config.pre_tool_speech;
 #endif
 
     auto monotonicMs = []() -> long long {

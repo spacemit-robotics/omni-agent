@@ -53,8 +53,17 @@ void TextBuffer::clear() {
 void TextBuffer::stop() {
     std::lock_guard<std::mutex> lock(mutex_);
     stop_flag_ = true;
+    flushLocked();
+    cv_.notify_all();
+}
 
-    // 将残留的 buffer_ 作为最后一个句子
+void TextBuffer::flush() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    flushLocked();
+}
+
+void TextBuffer::flushLocked() {
+    // 将残留的 buffer_ 作为一个句子
     if (!buffer_.empty()) {
         std::string trimmed = buffer_;
         trimmed.erase(0, trimmed.find_first_not_of(" \t\n\r"));
@@ -64,8 +73,6 @@ void TextBuffer::stop() {
         }
         buffer_.clear();
     }
-
-    cv_.notify_all();
 }
 
 void TextBuffer::processBuffer() {
