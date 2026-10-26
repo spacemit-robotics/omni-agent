@@ -37,7 +37,10 @@ class FakeOpenMeteo(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         if url.path == "/geocode":
-            body = {"results": [{"name": "汕尾", "latitude": 22.79, "longitude": 115.37}]} if query["name"] == "汕尾" else {}
+            body = (
+                {"results": [{"name": "汕尾", "latitude": 22.79, "longitude": 115.37}]}
+                if query["name"] == "汕尾" else {}
+            )
         elif FakeOpenMeteo.broken:
             body = {"current": {}}
         else:
@@ -102,21 +105,26 @@ def main():
         check("深圳" in tools[1]["inputSchema"]["properties"]["city"]["description"], "默认城市写进参数说明")
 
         text, failed = client.call("get_time")
-        check(not failed and re.fullmatch(r"现在是 \d{4} 年 \d{1,2} 月 \d{1,2} 日，星期[一二三四五六日]，\d\d:\d\d。", text),
+        check(not failed and re.fullmatch(
+            r"现在是 \d{4} 年 \d{1,2} 月 \d{1,2} 日，星期[一二三四五六日]，\d\d:\d\d。", text),
               f"get_time: {text}")
 
         text, failed = client.call("get_weather")
-        check(not failed and text == "深圳现在多云，气温 26 度，体感 28 度，湿度 70%，风力 3 级。今天 23 到 29 度，降水概率 20%。",
+        check(not failed and text == (
+            "深圳现在多云，气温 26 度，体感 28 度，湿度 70%，风力 3 级。"
+            "今天 23 到 29 度，降水概率 20%。"),
               f"默认城市天气: {text}")
         check([p for p, _ in FakeOpenMeteo.seen] == ["/forecast"], f"默认城市不查坐标: {FakeOpenMeteo.seen}")
         query = FakeOpenMeteo.seen[0][1]
         check(query["latitude"] == "22.54" and query["timezone"] == "Asia/Shanghai", f"天气请求参数: {query}")
-        check(client.call("get_weather", {"city": "深圳"})[0].startswith("深圳现在多云") and len(FakeOpenMeteo.seen) == 1,
+        check(client.call("get_weather", {"city": "深圳"})[0].startswith("深圳现在多云")
+              and len(FakeOpenMeteo.seen) == 1,
               f"10 分钟内同一地点用缓存: {FakeOpenMeteo.seen}")
 
         text, failed = client.call("get_weather", {"city": "北京市"})
         check(not failed and text.startswith("北京现在多云"), f"内置城市: {text}")
-        check([p for p, _ in FakeOpenMeteo.seen[1:]] == ["/forecast"] and FakeOpenMeteo.seen[1][1]["latitude"] == "39.9",
+        check([p for p, _ in FakeOpenMeteo.seen[1:]] == ["/forecast"]
+              and FakeOpenMeteo.seen[1][1]["latitude"] == "39.9",
               f"内置城市不查坐标: {FakeOpenMeteo.seen}")
 
         FakeOpenMeteo.seen.clear()
