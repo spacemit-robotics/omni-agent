@@ -21,6 +21,7 @@ import argparse
 import json
 import sys
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -140,25 +141,30 @@ class Info:
         key = (round(lat, 3), round(lon, 3))
         cached = self.weather.get(key)
         if cached and time.monotonic() - cached[0] < CACHE_S:
-            data = cached[1]
-        else:
-            data = self.fetch(self.weather_url, {
-                "latitude": lat, "longitude": lon, "timezone": self.timezone.key, "forecast_days": 1,
-                "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m",
-                "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
-            })
-            self.weather[key] = (time.monotonic(), data)
-        try:
-            current, daily = data["current"], data["daily"]
-            text = (f"{name}现在{WEATHER_CODES.get(int(current['weather_code']), '天气未知')}，"
-                    f"气温 {current['temperature_2m']:.0f} 度，体感 {current['apparent_temperature']:.0f} 度，"
-                    f"湿度 {current['relative_humidity_2m']:.0f}%，风力 {beaufort(current['wind_speed_10m'])} 级。"
-                    f"今天 {daily['temperature_2m_min'][0]:.0f} 到 {daily['temperature_2m_max'][0]:.0f} 度")
-            rain = daily.get("precipitation_probability_max", [None])[0]
-            return text + (f"，降水概率 {rain:.0f}%。" if rain is not None else "。")
-        except (KeyError, IndexError, TypeError, ValueError) as error:
-            log(f"天气数据格式不对: {error}")
-            raise ToolError("天气服务返回的数据看不懂，查不到天气。") from error
+            return describe_weather(name, cached[1])
+        data = self.fetch(self.weather_url, {
+            "latitude": lat, "longitude": lon, "timezone": self.timezone.key, "forecast_days": 1,
+            "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m",
+            "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+        })
+        text = describe_weather(name, data)
+        # 看得懂才缓存：一次坏数据不能让这个地点 10 分钟都查不到
+        self.weather[key] = (time.monotonic(), data)
+        return text
+
+
+def describe_weather(name, data):
+    try:
+        current, daily = data["current"], data["daily"]
+        text = (f"{name}现在{WEATHER_CODES.get(int(current['weather_code']), '天气未知')}，"
+                f"气温 {current['temperature_2m']:.0f} 度，体感 {current['apparent_temperature']:.0f} 度，"
+                f"湿度 {current['relative_humidity_2m']:.0f}%，风力 {beaufort(current['wind_speed_10m'])} 级。"
+                f"今天 {daily['temperature_2m_min'][0]:.0f} 到 {daily['temperature_2m_max'][0]:.0f} 度")
+        rain = daily.get("precipitation_probability_max", [None])[0]
+        return text + (f"，降水概率 {rain:.0f}%。" if rain is not None else "。")
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        log(f"天气数据格式不对: {error}")
+        raise ToolError("天气服务返回的数据看不懂，查不到天气。") from error
 
 
 def beaufort(kmh):
@@ -198,6 +204,9 @@ def handle(info, message):
             text, failed = info.call(name, arguments), False
         except ToolError as error:
             text, failed = str(error), True
+        except Exception:  # 意外的数据或 bug 只让这次调用失败，服务不能退出
+            log(f"{name} 意外出错:\n{traceback.format_exc().rstrip()}")
+            text, failed = "查询出错了，没查到结果。", True
         log(f"{name} {json.dumps(arguments, ensure_ascii=False)} -> {text}")
         return reply(msg_id, {"content": [{"type": "text", "text": text}], "isError": failed})
     return error_reply(msg_id, -32601, f"method not found: {method}")

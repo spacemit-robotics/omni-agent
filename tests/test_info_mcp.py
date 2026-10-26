@@ -21,6 +21,10 @@ FORECAST = {
                 "weather_code": 2, "wind_speed_10m": 14.0},
     "daily": {"temperature_2m_max": [29.2], "temperature_2m_min": [23.0], "precipitation_probability_max": [20]},
 }
+GEOCODE = {
+    "汕尾": {"results": [{"name": "汕尾", "latitude": 22.79, "longitude": 115.37}]},
+    "坏数据": ["不是 JSON 对象"],
+}
 
 
 class FakeOpenMeteo(BaseHTTPRequestHandler):
@@ -37,10 +41,7 @@ class FakeOpenMeteo(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         if url.path == "/geocode":
-            body = (
-                {"results": [{"name": "汕尾", "latitude": 22.79, "longitude": 115.37}]}
-                if query["name"] == "汕尾" else {}
-            )
+            body = GEOCODE.get(query["name"], {})
         elif FakeOpenMeteo.broken:
             body = {"current": {}}
         else:
@@ -138,6 +139,10 @@ def main():
         text, failed = client.call("get_weather", {"city": "不存在市"})
         check(failed and "没找到" in text, f"找不到城市: {text}")
 
+        text, failed = client.call("get_weather", {"city": "坏数据"})
+        check(failed and "出错" in text, f"意外的数据只让这次调用失败: {text}")
+        check(not client.call("get_time")[1], "意外出错后服务还在")
+
         FakeOpenMeteo.broken = True
         FakeOpenMeteo.seen.clear()
         text, failed = client.call("get_weather", {"city": "汕尾"})
@@ -166,6 +171,9 @@ def main():
         client3.send("initialize", {})
         text, failed = client3.call("get_weather")
         check(failed and "看不懂" in text, f"数据不对: {text}")
+        FakeOpenMeteo.broken = False
+        text, failed = client3.call("get_weather")
+        check(not failed and text.startswith("深圳现在多云"), f"看不懂的数据不缓存: {text}")
     finally:
         client3.proc.kill()
         broken.shutdown()
