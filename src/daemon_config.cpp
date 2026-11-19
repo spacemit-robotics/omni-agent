@@ -69,6 +69,7 @@ const char* kVoiceChatConfigTemplate = R"({
     },
     "asr": {
         "engine":             "qwen3-asr",
+        "provider":           "",
         "endpoint":           "http://127.0.0.1:8063/v1/chat/completions",
         "model":              "qwen3-asr",
         "timeout":            60,
@@ -388,6 +389,10 @@ void ParseAsr(const json& j, AsrCfg& asr) {
     }
     const json& a = *it;
     GetOpt(a, "engine", asr.engine);
+    GetOpt(a, "provider", asr.provider);
+    if (!asr.provider.empty() && asr.provider != "cpu" && asr.provider != "spacemit") {
+        throw std::runtime_error("asr.provider must be \"\", \"cpu\" or \"spacemit\"");
+    }
     GetOpt(a, "endpoint", asr.endpoint);
     GetOpt(a, "model", asr.model);
     GetOpt(a, "timeout", asr.timeout);
@@ -673,6 +678,7 @@ json VoiceChatJson(const DaemonConfig& cfg) {
     };
     j["asr"] = {
         {"engine", cfg.asr.engine},
+        {"provider", cfg.asr.provider},
         {"endpoint", cfg.asr.endpoint},
         {"model", cfg.asr.model},
         {"timeout", cfg.asr.timeout},

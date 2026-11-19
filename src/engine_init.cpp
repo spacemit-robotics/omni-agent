@@ -127,10 +127,17 @@ std::shared_ptr<SpacemiT::AsrEngine> initASR(
     const std::string& asr_engine,
     const std::string& asr_endpoint,
     const std::string& asr_model,
-    int asr_timeout) {
+    int asr_timeout,
+    const std::string& asr_provider) {
     std::string engine = normalizeAsrEngine(asr_engine);
     std::cout << getTimestamp() << " [3/5] 初始化 ASR (" << engine
         << ")..." << std::flush;
+
+    if (!asr_provider.empty() && asr_provider != "cpu" && asr_provider != "spacemit") {
+        std::cerr << "\n" << getTimestamp() << " 错误: ASR provider 只能是 cpu 或 spacemit，当前为 "
+            << asr_provider << "\n";
+        return nullptr;
+    }
 
     SpacemiT::AsrConfig asr_config;
     try {
@@ -142,6 +149,10 @@ std::shared_ptr<SpacemiT::AsrEngine> initASR(
     }
     asr_config.language = "auto";
     asr_config.punctuation = true;
+    if (!asr_provider.empty()) {
+        asr_config.provider = asr_provider;
+    }
+    std::cout << " provider=" << asr_config.provider;
     if (engine == "qwen3-asr") {
         if (!asr_endpoint.empty()) {
             asr_config.endpoint = asr_endpoint;

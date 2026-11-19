@@ -1841,6 +1841,10 @@ int CmdStart(int argc, char** argv) {
     vc_args.push_back(std::to_string(speech_channel));
     vc_args.push_back("--asr-engine");
     vc_args.push_back(cfg.asr.engine);
+    if (!cfg.asr.provider.empty()) {
+        vc_args.push_back("--asr-provider");
+        vc_args.push_back(cfg.asr.provider);
+    }
     if (!asr_endpoint.empty()) {
         vc_args.push_back("--asr-endpoint");
         vc_args.push_back(asr_endpoint);

@@ -60,6 +60,9 @@ struct VadCfg {
 struct AsrCfg {
     // ASR 后端：sensevoice / qwen3-asr / zipformer。
     std::string engine = "qwen3-asr";
+    // 本地 ONNX 引擎（sensevoice / zipformer）的推理 provider：cpu / spacemit；
+    // 为空时沿用引擎预设。
+    std::string provider;
     // Qwen3-ASR llama-server OpenAI-compatible chat completions endpoint。
     std::string endpoint = "http://127.0.0.1:8063/v1/chat/completions";
     // Qwen3-ASR llama-server model tag。

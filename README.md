@@ -196,6 +196,7 @@ voice_chat_daemon restart
 | 换音频设备或采样率 | `voice_chat.json` 的 `audio` |
 | 调 VAD 灵敏度 | `voice_chat.json` 的 `vad.threshold` / `vad.silence_duration` |
 | 切换 ASR 后端 | `voice_chat.json` 的 `asr.engine`，默认 `qwen3-asr`；qwen3-asr 还需 `asr.endpoint` / `asr.model` |
+| 指定本地 ASR 推理方式 | `voice_chat.json` 的 `asr.provider`：`cpu` / `spacemit`，空字符串沿用引擎预设；只对 sensevoice / zipformer 生效。直接运行 `voice_chat` / `voice_chat_aec` / `ptt_chat` 时用 `--asr-provider` |
 | 开启唤醒打断 | `voice_chat.json` 的 `wake.enabled` / `wake.source` / `wake.kws` / `wake.device` / `wake.interrupt_mode` / `wake.ack_audio` / `wake.ack_audio_url` |
 | 配置唤醒词 ASR 清洗 | `voice_chat.json` 的 `wake.strip_from_asr` / `wake.phrases` / `wake.command_timeout_ms` |
 | 修改或关闭启动问候 | `voice_chat.json` 的 `startup_greeting`；设为空字符串可关闭 |

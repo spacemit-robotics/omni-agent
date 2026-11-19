@@ -36,3 +36,12 @@ tests:
     workdir: sdk
     command: |
       python3 application/native/omni_agent/tests/test_info_mcp.py
+
+  - name: omni-agent-daemon-config
+    description: Verifies daemon config parsing for asr.provider - default template value, cpu and spacemit accepted and shown in the merged config, unknown or differently cased values rejected.
+    category: functional
+    scopes: [pr]
+    timeout_s: 120
+    workdir: sdk
+    command: |
+      bash application/native/omni_agent/tests/test_daemon_config.sh

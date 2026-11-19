@@ -73,6 +73,7 @@ struct PttConfig {
     std::string system_prompt = "You are a helpful assistant.";
     std::string mcp_config_path;
     std::string asr_engine = "sensevoice";
+    std::string asr_provider;  // 空 = 沿用引擎预设
     std::string tts_type = "matcha:zh-en";
     std::string output_device;  // 空 = 系统默认；数字 = 设备号；none = 不出声；其他 = 设备名片段
     int playback_rate = 16000;
@@ -389,6 +390,7 @@ void printUsage(const char* program) {
         << "  --mcp-config <file>        MCP 配置 (和 voice_chat 相同的 mcp.json 格式)\n"
         << "  --system-prompt <text>     不用 MCP 时的 system prompt\n"
         << "  --asr <engine>             ASR 后端 (默认: sensevoice)\n"
+        << "  --asr-provider <name>      sensevoice/zipformer 推理: cpu | spacemit (默认: 引擎预设)\n"
         << "  --tts <engine>             TTS 后端 (默认: matcha:zh-en)\n"
         << "  -o, --output-device <dev>  扬声器：设备号或设备名片段，none 不出声 (默认: 系统默认)\n"
         << "  --playback-rate <hz>       (默认: 16000)\n"
@@ -417,6 +419,8 @@ bool parseArgs(int argc, char* argv[], PttConfig* cfg) {
             cfg->system_prompt = argv[++i];
         } else if (arg == "--asr" && has_value) {
             cfg->asr_engine = argv[++i];
+        } else if (arg == "--asr-provider" && has_value) {
+            cfg->asr_provider = argv[++i];
         } else if (arg == "--tts" && has_value) {
             cfg->tts_type = argv[++i];
         } else if ((arg == "-o" || arg == "--output-device") && has_value) {
@@ -472,7 +476,7 @@ int main(int argc, char* argv[]) {
     llm->update_stall_timeout(cfg.llm_stall_timeout);
     auto system_prompt = llm_result.system_prompt;
 
-    auto asr = initASR(cfg.asr_engine, "", "", 0);
+    auto asr = initASR(cfg.asr_engine, "", "", 0, cfg.asr_provider);
     if (!asr) return 1;
     auto vad = initVAD(0.5f);  // processText 结束时会重置 VAD 状态
     if (!vad) return 1;
