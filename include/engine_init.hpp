@@ -33,11 +33,15 @@ LLMInitResult initLLM(const std::string& llm_model, const std::string& llm_url,
 
 std::shared_ptr<SpacemiT::VadEngine> initVAD(float vad_threshold);
 
+// asr_provider: "cpu" / "spacemit" overrides the engine preset's inference
+// provider; empty keeps the preset. Only local ONNX engines (sensevoice,
+// zipformer) use it. Any other value fails initialisation.
 std::shared_ptr<SpacemiT::AsrEngine> initASR(
     const std::string& asr_engine,
     const std::string& asr_endpoint,
     const std::string& asr_model,
-    int asr_timeout);
+    int asr_timeout,
+    const std::string& asr_provider = "");
 
 struct TTSInitResult {
     std::shared_ptr<SpacemiT::TtsEngine> tts;

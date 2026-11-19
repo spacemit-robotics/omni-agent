@@ -69,6 +69,7 @@ const char* kVoiceChatConfigTemplate = R"({
     },
     "asr": {
         "engine":             "qwen3-asr",
+        "provider":           "",
         "endpoint":           "http://127.0.0.1:8063/v1/chat/completions",
         "model":              "qwen3-asr",
         "timeout":            60,
@@ -142,6 +143,7 @@ const char* kLlmConfigTemplate = R"({
     "model_name":        "qwen2.5-0.5b",
     "ctx_size":          4096,
     "threads":           4,
+    "startup_timeout":   60,
     "reasoning_budget":  0,
     "extra_args":        [],
     "extra_body":        {},
@@ -388,6 +390,10 @@ void ParseAsr(const json& j, AsrCfg& asr) {
     }
     const json& a = *it;
     GetOpt(a, "engine", asr.engine);
+    GetOpt(a, "provider", asr.provider);
+    if (!asr.provider.empty() && asr.provider != "cpu" && asr.provider != "spacemit") {
+        throw std::runtime_error("asr.provider must be \"\", \"cpu\" or \"spacemit\"");
+    }
     GetOpt(a, "endpoint", asr.endpoint);
     GetOpt(a, "model", asr.model);
     GetOpt(a, "timeout", asr.timeout);
@@ -470,6 +476,10 @@ void ParseLlm(const json& j, DaemonConfig& cfg) {
     GetOpt(j, "model_name", llm.model_name);
     GetOpt(j, "ctx_size", llm.ctx_size);
     GetOpt(j, "threads", llm.threads);
+    GetOpt(j, "startup_timeout", llm.startup_timeout);
+    if (llm.startup_timeout <= 0) {
+        throw std::runtime_error("llm.startup_timeout must be positive");
+    }
     GetOpt(j, "reasoning_budget", llm.reasoning_budget);
     GetOpt(j, "extra_args", llm.extra_args);
     GetOpt(j, "max_tokens", llm.max_tokens);
@@ -673,6 +683,7 @@ json VoiceChatJson(const DaemonConfig& cfg) {
     };
     j["asr"] = {
         {"engine", cfg.asr.engine},
+        {"provider", cfg.asr.provider},
         {"endpoint", cfg.asr.endpoint},
         {"model", cfg.asr.model},
         {"timeout", cfg.asr.timeout},
@@ -744,6 +755,7 @@ json LlmJson(const LlmCfg& llm) {
         {"model_name", llm.model_name},
         {"ctx_size", llm.ctx_size},
         {"threads", llm.threads},
+        {"startup_timeout", llm.startup_timeout},
         {"reasoning_budget", llm.reasoning_budget},
         {"extra_args", llm.extra_args},
         {"extra_body", llm.extra_body},

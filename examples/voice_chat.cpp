@@ -72,6 +72,7 @@ struct Config {
     std::string asr_endpoint = "http://127.0.0.1:8063/v1/chat/completions";
     std::string asr_model = "qwen3-asr";
     int asr_timeout = 60;
+    std::string asr_provider;
     bool wake_enabled = false;
     std::string wake_source = "hid";       // voice_chat only supports the SPV board's HID report
     std::string wake_device = "/dev/hidraw0";
@@ -155,6 +156,8 @@ Config parseArgs(int argc, char* argv[]) {
             cfg.asr_model = argv[++i];
         } else if (strcmp(argv[i], "--asr-timeout") == 0 && i + 1 < argc) {
             cfg.asr_timeout = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--asr-provider") == 0 && i + 1 < argc) {
+            cfg.asr_provider = argv[++i];
         } else if ((strcmp(argv[i], "--input-device") == 0 || strcmp(argv[i], "-i") == 0) && i + 1 < argc) {
             cfg.input_device = std::stoi(argv[++i]);
         } else if ((strcmp(argv[i], "--output-device") == 0 || strcmp(argv[i], "-o") == 0) && i + 1 < argc) {
@@ -365,6 +368,7 @@ Config parseArgs(int argc, char* argv[]) {
                 << "  --asr-endpoint <url>          qwen3-asr llama-server endpoint\n"
                 << "  --asr-model <name>            qwen3-asr model tag (默认: qwen3-asr)\n"
                 << "  --asr-timeout <sec>           qwen3-asr HTTP超时 (默认: 60)\n"
+                << "  --asr-provider <name>         sensevoice/zipformer 推理: cpu | spacemit (默认: 引擎预设)\n"
                 << "\n唤醒:\n"
                 << "  --wake-enabled, --wake        开启 HID 唤醒打断\n"
                 << "  --no-wake                     关闭 HID 唤醒打断\n"
@@ -604,6 +608,9 @@ int main(int argc, char* argv[]) {
     if (cfg.asr_engine == "qwen3-asr") {
         std::cout << " (" << cfg.asr_endpoint << ", model=" << cfg.asr_model << ")";
     }
+    if (!cfg.asr_provider.empty()) {
+        std::cout << " provider=" << cfg.asr_provider;
+    }
     std::cout << "\n";
     std::cout << getTimestamp() << " HID唤醒: "
         << (cfg.wake_enabled ? ("ON (" + cfg.wake_device + ")") : "OFF") << "\n";
@@ -649,7 +656,8 @@ int main(int argc, char* argv[]) {
     if (!vad) return 1;
 
     auto asr = initASR(
-        cfg.asr_engine, cfg.asr_endpoint, cfg.asr_model, cfg.asr_timeout);
+        cfg.asr_engine, cfg.asr_endpoint, cfg.asr_model, cfg.asr_timeout,
+        cfg.asr_provider);
     if (!asr) return 1;
 
     auto tts_result = initTTS(cfg.tts_type);

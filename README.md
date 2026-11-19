@@ -196,12 +196,14 @@ voice_chat_daemon restart
 | 换音频设备或采样率 | `voice_chat.json` 的 `audio` |
 | 调 VAD 灵敏度 | `voice_chat.json` 的 `vad.threshold` / `vad.silence_duration` |
 | 切换 ASR 后端 | `voice_chat.json` 的 `asr.engine`，默认 `qwen3-asr`；qwen3-asr 还需 `asr.endpoint` / `asr.model` |
+| 指定本地 ASR 推理方式 | `voice_chat.json` 的 `asr.provider`：`cpu` / `spacemit`，空字符串沿用引擎预设；只对 sensevoice / zipformer 生效。直接运行 `voice_chat` / `voice_chat_aec` / `ptt_chat` 时用 `--asr-provider` |
 | 开启唤醒打断 | `voice_chat.json` 的 `wake.enabled` / `wake.source` / `wake.kws` / `wake.device` / `wake.interrupt_mode` / `wake.ack_audio` / `wake.ack_audio_url` |
 | 配置唤醒词 ASR 清洗 | `voice_chat.json` 的 `wake.strip_from_asr` / `wake.phrases` / `wake.command_timeout_ms` |
 | 修改或关闭启动问候 | `voice_chat.json` 的 `startup_greeting`；设为空字符串可关闭 |
 | 保存调试录音、ASR 输入或 TTS 输出 | `voice_chat.json` 的 `debug.save_audio` / `debug.save_asr_audio` / `debug.save_tts_audio` |
 | 保存逐帧对齐的 AEC/KWS 测试录音 | `voice_chat.json` 的 `debug.save_aec_dump` / `debug.aec_dump_dir`，见“唤醒与 AEC 测试录音” |
 | 换模型、端口、线程数 | `llm.json` |
+| 本地 LLM 启动等待 | `llm.json` 的 `startup_timeout`（秒，默认 60）：daemon 等 llama-server 的 `/health` 返回 200（模型加载完）再拉起语音链路，超时则报错退出；模型大或存储慢时调大 |
 | 调回复长度、思考输出或系统提示词 | `llm.json` 的 `max_tokens` / `reasoning_budget` / `system_prompt` |
 | 启用声纹验证 | `voiceprint.json` 的 `enabled` / `verify` |
 | 启用 MCP 工具 | `mcp.json` 的 `enabled` / `servers` |

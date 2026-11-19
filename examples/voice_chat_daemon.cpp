@@ -312,16 +312,6 @@ bool PortInUse(const std::string& host, int port) {
     return connected;
 }
 
-bool WaitPortReady(const std::string& host, int port, int timeout_sec) {
-    for (int i = 0; i < timeout_sec * 4; ++i) {
-        if (PortInUse(host, port)) {
-            return true;
-        }
-        usleep(250 * 1000);
-    }
-    return false;
-}
-
 int RunSyncWithEnv(const std::string& prog,
         const std::vector<std::string>& args,
         const std::vector<std::pair<std::string, std::string>>& envs) {
@@ -1585,14 +1575,24 @@ int CmdStart(int argc, char** argv) {
     }
     if (p1 > 0) {
         close(startup_pipe[1]);
-        const int startup_wait_ticks = 100
-            + (start_local_llm ? 700 : 0)
-            + (start_local_asr ? (cfg.asr.startup_timeout + 10) * 10 : 0);
+        // Wait longer than the daemon can take: each local server gets its own
+        // startup_timeout plus 10 s, and 10 s more covers the remaining steps.
+        // Giving up earlier reports a failure while the daemon keeps starting.
+        int64_t startup_wait_ms = 10 * 1000;
+        if (start_local_llm) {
+            startup_wait_ms += (static_cast<int64_t>(std::max(1, cfg.llm.startup_timeout)) + 10) * 1000;
+        }
+        if (start_local_asr) {
+            startup_wait_ms += (static_cast<int64_t>(std::max(1, cfg.asr.startup_timeout)) + 10) * 1000;
+        }
+        const int64_t startup_deadline_ms = MonotonicMs() + startup_wait_ms;
         bool startup_failed = false;
-        for (int i = 0; i < startup_wait_ticks; ++i) {
+        bool startup_reported = false;
+        while (MonotonicMs() < startup_deadline_ms) {
             char status = 0;
             ssize_t n = read(startup_pipe[0], &status, 1);
             if (n == 1) {
+                startup_reported = true;
                 if (status != '1') {
                     startup_failed = true;
                 }
@@ -1609,6 +1609,10 @@ int CmdStart(int argc, char** argv) {
             usleep(100 * 1000);
         }
         close(startup_pipe[0]);
+        if (!startup_reported && !startup_failed) {
+            std::cerr << "[warn] " << startup_wait_ms / 1000
+                << " 秒内未收到 daemon 的启动结果\n";
+        }
         PidRecord started;
         if (startup_failed || !ReadPidFile(pid_file, &started) ||
                 !ProcessAlive(started.daemon_pid)) {
@@ -1691,9 +1695,13 @@ int CmdStart(int argc, char** argv) {
             stop_mcp_if_started();
             return 1;
         }
-        if (!WaitPortReady(cfg.llm.server_host, cfg.llm.server_port, 60)) {
-            std::cerr << "错误: llama-server 60 秒内未就绪 (port "
-                << cfg.llm.server_port << ")\n";
+        // llama-server listens before the model is loaded and answers 503
+        // until then; only /health returning 200 means it can serve requests.
+        if (!WaitHttpHealthReady(cfg.llm.server_host, cfg.llm.server_port,
+                cfg.llm.startup_timeout)) {
+            std::cerr << "错误: llama-server " << cfg.llm.startup_timeout
+                << " 秒内未就绪 (port " << cfg.llm.server_port
+                << "，/health 未返回 200)\n";
             kill(llama_pid, SIGTERM);
             WriteStartupStatus(startup_pipe[1], '0');
             stop_mcp_if_started();
@@ -1841,6 +1849,10 @@ int CmdStart(int argc, char** argv) {
     vc_args.push_back(std::to_string(speech_channel));
     vc_args.push_back("--asr-engine");
     vc_args.push_back(cfg.asr.engine);
+    if (!cfg.asr.provider.empty()) {
+        vc_args.push_back("--asr-provider");
+        vc_args.push_back(cfg.asr.provider);
+    }
     if (!asr_endpoint.empty()) {
         vc_args.push_back("--asr-endpoint");
         vc_args.push_back(asr_endpoint);

@@ -41,6 +41,12 @@ std::string normalizeAsrEngine(const std::string& engine) {
     return engine;
 }
 
+// Only the local ONNX backends read AsrConfig::provider; the HTTP engines
+// (qwen3-asr, funasr, gemma4-asr) leave inference to their server.
+bool asrEngineUsesProvider(const std::string& engine) {
+    return engine == "sensevoice" || engine == "zipformer";
+}
+
 }  // namespace
 
 LLMInitResult initLLM(const std::string& llm_model, const std::string& llm_url,
@@ -127,10 +133,17 @@ std::shared_ptr<SpacemiT::AsrEngine> initASR(
     const std::string& asr_engine,
     const std::string& asr_endpoint,
     const std::string& asr_model,
-    int asr_timeout) {
+    int asr_timeout,
+    const std::string& asr_provider) {
     std::string engine = normalizeAsrEngine(asr_engine);
     std::cout << getTimestamp() << " [3/5] 初始化 ASR (" << engine
         << ")..." << std::flush;
+
+    if (!asr_provider.empty() && asr_provider != "cpu" && asr_provider != "spacemit") {
+        std::cerr << "\n" << getTimestamp() << " 错误: ASR provider 只能是 cpu 或 spacemit，当前为 "
+            << asr_provider << "\n";
+        return nullptr;
+    }
 
     SpacemiT::AsrConfig asr_config;
     try {
@@ -142,6 +155,15 @@ std::shared_ptr<SpacemiT::AsrEngine> initASR(
     }
     asr_config.language = "auto";
     asr_config.punctuation = true;
+    if (asrEngineUsesProvider(engine)) {
+        if (!asr_provider.empty()) {
+            asr_config.provider = asr_provider;
+        }
+        std::cout << " provider=" << asr_config.provider;
+    } else if (!asr_provider.empty()) {
+        std::cerr << "\n" << getTimestamp() << " [warn] ASR provider 只对 sensevoice / zipformer 生效，"
+            << engine << " 忽略 provider=" << asr_provider << "\n";
+    }
     if (engine == "qwen3-asr") {
         if (!asr_endpoint.empty()) {
             asr_config.endpoint = asr_endpoint;

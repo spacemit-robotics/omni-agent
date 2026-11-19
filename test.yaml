@@ -36,3 +36,12 @@ tests:
     workdir: sdk
     command: |
       python3 application/native/omni_agent/tests/test_info_mcp.py
+
+  - name: omni-agent-daemon-config
+    description: Verifies daemon config parsing for asr.provider and llm.startup_timeout - default template values, valid values parsed and shown in the merged config, unknown provider names and non-positive timeouts rejected.
+    category: functional
+    scopes: [pr]
+    timeout_s: 120
+    workdir: sdk
+    command: |
+      bash application/native/omni_agent/tests/test_daemon_config.sh
