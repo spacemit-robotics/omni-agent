@@ -184,6 +184,8 @@ struct LlmCfg {
     int ctx_size = 4096;
     // llama-server 推理线程数。
     int threads = 4;
+    // 自动启动 llama-server 时等待 /health 返回 200（模型加载完成）的秒数，必须为正。
+    int startup_timeout = 60;
     // Qwen/DeepSeek-R1 等 thinking 模型的 reasoning budget；-1 表示不传。
     int reasoning_budget = 0;
     // 追加给 llama-server 的原始参数。

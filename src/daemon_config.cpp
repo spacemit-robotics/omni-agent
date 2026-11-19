@@ -143,6 +143,7 @@ const char* kLlmConfigTemplate = R"({
     "model_name":        "qwen2.5-0.5b",
     "ctx_size":          4096,
     "threads":           4,
+    "startup_timeout":   60,
     "reasoning_budget":  0,
     "extra_args":        [],
     "extra_body":        {},
@@ -475,6 +476,10 @@ void ParseLlm(const json& j, DaemonConfig& cfg) {
     GetOpt(j, "model_name", llm.model_name);
     GetOpt(j, "ctx_size", llm.ctx_size);
     GetOpt(j, "threads", llm.threads);
+    GetOpt(j, "startup_timeout", llm.startup_timeout);
+    if (llm.startup_timeout <= 0) {
+        throw std::runtime_error("llm.startup_timeout must be positive");
+    }
     GetOpt(j, "reasoning_budget", llm.reasoning_budget);
     GetOpt(j, "extra_args", llm.extra_args);
     GetOpt(j, "max_tokens", llm.max_tokens);
@@ -750,6 +755,7 @@ json LlmJson(const LlmCfg& llm) {
         {"model_name", llm.model_name},
         {"ctx_size", llm.ctx_size},
         {"threads", llm.threads},
+        {"startup_timeout", llm.startup_timeout},
         {"reasoning_budget", llm.reasoning_budget},
         {"extra_args", llm.extra_args},
         {"extra_body", llm.extra_body},
