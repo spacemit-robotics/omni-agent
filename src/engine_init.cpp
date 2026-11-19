@@ -41,6 +41,12 @@ std::string normalizeAsrEngine(const std::string& engine) {
     return engine;
 }
 
+// Only the local ONNX backends read AsrConfig::provider; the HTTP engines
+// (qwen3-asr, funasr, gemma4-asr) leave inference to their server.
+bool asrEngineUsesProvider(const std::string& engine) {
+    return engine == "sensevoice" || engine == "zipformer";
+}
+
 }  // namespace
 
 LLMInitResult initLLM(const std::string& llm_model, const std::string& llm_url,
@@ -149,10 +155,15 @@ std::shared_ptr<SpacemiT::AsrEngine> initASR(
     }
     asr_config.language = "auto";
     asr_config.punctuation = true;
-    if (!asr_provider.empty()) {
-        asr_config.provider = asr_provider;
+    if (asrEngineUsesProvider(engine)) {
+        if (!asr_provider.empty()) {
+            asr_config.provider = asr_provider;
+        }
+        std::cout << " provider=" << asr_config.provider;
+    } else if (!asr_provider.empty()) {
+        std::cerr << "\n" << getTimestamp() << " [warn] ASR provider 只对 sensevoice / zipformer 生效，"
+            << engine << " 忽略 provider=" << asr_provider << "\n";
     }
-    std::cout << " provider=" << asr_config.provider;
     if (engine == "qwen3-asr") {
         if (!asr_endpoint.empty()) {
             asr_config.endpoint = asr_endpoint;
